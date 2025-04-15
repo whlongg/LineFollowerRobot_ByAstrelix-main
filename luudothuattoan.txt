@@ -1,0 +1,114 @@
+===============================================================
+        ROBOT LINE FOLLOWER - CẤU TRÚC THUẬT TOÁN(PD)
+                                              by astrelix.dev
+===============================================================
+
+== GIAI ĐOẠN KHỞI TẠO (setup()) ==
+
+[ BẮT ĐẦU ]
+    |
+    +--- [ Khởi tạo Serial (Debug) ]
+    |
+    +--- [ Khởi tạo chân GPIO (Cảm biến, Motor Pins, LED) ]
+    |
+    +--- [ Khởi tạo PWM cho Động cơ (vd: ledcSetup, ledcAttachPin) ]
+    |
+    +--- [ Bật LED chiếu sáng ]
+    |
+    +--- [ Khởi tạo biến toàn cục (Kp, Kd, baseSpeed, lastError, currentState, ...) ]
+    |
+    +--- [ *** QUAN TRỌNG: Hiệu Chỉnh Cảm Biến (calibrateSensors()) *** ]
+    |      +--- Đọc giá trị trắng (whiteVal)
+    |      +--- Đọc giá trị đen (blackVal)
+    |      +--- Tính toán Threshold cho từng cảm biến:
+    |      |      threshold = whiteVal + (blackVal - whiteVal) * FACTOR (vd: 0.3-0.4)
+    |      |      (Mục đích: Để các vạch màu (xanh) cũng được coi là > threshold)
+    |      +--- Lưu giá trị Threshold[]
+    |
+    +--- [ Chờ tín hiệu bắt đầu (nếu cần) ]
+    |
+[ KẾT THÚC SETUP ]
+
+
+== VÒNG LẶP CHÍNH (loop()) ==
+
+[ BẮT ĐẦU VÒNG LẶP ]
+    |
+    |----------------------------------------------------------+
+    |                                                          |
+    V                                                          |
+[ 1. Đọc Cảm Biến & Tính Sai Số (Error) ]                      |
+    |                                                          |
+    +--- [ Đọc giá trị Analog thô từ 4 cảm biến IR ]           |
+    |                                                          |
+    +--- [ Digital Hóa Tín Hiệu ]                              |
+    |      +--- For each sensor i:                             |
+    |      |      digitalValue[i] = (analogValue[i] > threshold[i]) ? 1 : 0
+    |      |      (Dấu > hay < tùy thuộc cảm biến, đảm bảo 1=LINE, 0=NỀN)
+    |                                                          |
+    +--- [ Tính Toán Sai Số (Error) ]                          |
+    |      +--- Gán trọng số (ví dụ: weights = {-3, -1, 1, 3}) |
+    |      +--- error = 0; sum = 0;                            |
+    |      +--- For each sensor i:                             |
+    |      |      if (digitalValue[i] == 1):                   |
+    |      |          error += weights[i];                     |
+    |      |          sum += 1;                                |
+    |      +--- Lưu lại trạng thái digital [d1, d2, d3, d4]    |
+    |                                                          |
+    V                                                          |
+[ 2. Kiểm Tra & Cập Nhật Trạng Thái Robot (State Machine) ]    |
+    |                                                          |
+    +--- [ Dựa vào trạng thái digital [d1, d2, d3, d4] và trạng thái hiện tại ]
+    |                                                          |
+    +--- < Có phải [0,0,0,0] (Mất line)? > --- YES ---> [ currentState = LINE_LOST ]
+    |      | NO                                                |
+    |      V                                                   |
+    +--- < Có phải [1,1,1,1] (Giao lộ/Vạch ngang)? > - YES -> [ currentState = INTERSECTION ]
+    |      | NO                                                |
+    |      V                                                   |
+    +--- < Các trường hợp còn lại (thấy line)? > ---- YES ---> [ currentState = FOLLOWING_LINE ]
+    |      (Có thể thêm các trạng thái khác nếu cần)           |
+    |                                                          |
+    V                                                          |
+[ 3. Tính Toán Tín Hiệu Điều Khiển (Correction) ]              |
+    |                                                          |
+    +--- [ Dựa trên currentState và error ]                    |
+    |                                                          |
+    +--- IF currentState == FOLLOWING_LINE:                    |
+    |      +--- derivative = error - lastError                 |
+    |      +--- correction = (Kp * error) + (Kd * derivative) |
+    |      +--- lastError = error                             |
+    |                                                          |
+    +--- ELSE IF currentState == INTERSECTION:                 |
+    |      +--- [ Thực hiện logic cho giao lộ ]                |
+    |      |      (Ví dụ: đi thẳng một đoạn ngắn)             |
+    |      +--- correction = 0  (Hoặc giá trị để đi thẳng)     |
+    |      +--- (Có thể cần timer/encoder để kiểm soát)        |
+    |                                                          |
+    +--- ELSE IF currentState == LINE_LOST:                    |
+    |      +--- [ Thực hiện logic tìm line ]                   |
+    |      |      (Ví dụ: xoay theo hướng lỗi cuối cùng)       |
+    |      +--- correction = giá trị để xoay/tìm kiếm          |
+    |                                                          |
+    V                                                          |
+[ 4. Tính Tốc Độ PWM Cho 2 Động Cơ ]                           |
+    |                                                          |
+    +--- leftSpeedPWM = baseSpeed - correction                 |
+    +--- rightSpeedPWM = baseSpeed + correction                |
+    |                                                          |
+    +--- [ *** QUAN TRỌNG: Giới hạn tốc độ PWM *** ]           |
+    |      +--- Giới hạn giá trị trong khoảng [0, MAX_PWM]      |
+    |      |    (MAX_PWM < 255 nếu dùng Li-ion để bảo vệ Motor 5V)
+    |      +--- Xử lý giá trị âm (nếu cần điều khiển lùi)      |
+    |                                                          |
+    V                                                          |
+[ 5. Điều Khiển Động Cơ ]                                      |
+    |                                                          |
+    +--- [ Gửi giá trị PWM (vd: ledcWrite) và tín hiệu chiều quay (DIR) ]
+    |      +--- Motor Trái: PWM = leftSpeedPWM, DIR = ...      |
+    |      +--- Motor Phải: PWM = rightSpeedPWM, DIR = ...     |
+    |                                                          |
+    V                                                          |
+[ KẾT THÚC VÒNG LẶP ]                                          |
+    |                                                          |
+    +----------------------------------------------------------+  (Lặp lại)
