@@ -10,15 +10,20 @@
 #define LOG_CALIB  3
 
 const float SCALE_RIGHT_MOTOR = 0.999;
-const float Kp_default = 0.4;
-const float Ki_default = 0.0;
-const float Kd_default = 0.11;
+const float Kp_default = 0.133; //Ku: 0.222
+const float Ki_default = 0.0013;
+const float Kd_default = 0.017;
 const float INTEGRAL_MAX = 50.0f;
+
+const int MAX_STRAIGHT_SPEED = 245; // Tốc độ tối đa mong muốn trên đường thẳng (để lại chút headroom)
+const int CORNERING_SPEED = 190;    // Tốc độ cơ bản an toàn khi vào cua hoặc hiệu chỉnh mạnh
+const float MAX_ERROR_FOR_HIGH_SPEED = 0.5; // Ngưỡng lỗi tối đa để còn chạy tốc độ cao (cần tune)
+const float MIN_ERROR_FOR_LOW_SPEED = 1.5;  // Ngưỡng lỗi tối thiểu để chắc chắn chạy tốc độ thấp (cần tune)
 
 const int PWM_FREQ = 20000;
 const int PWM_RES = 8;
 const int MAX_PWM = 255;
-const int BASE_SPEED = 180;
+const int BASE_SPEED = 190;
 const int CORRECTION_SCALE = 100;
 const float IR_WEIGHT = 0.22;
 const float RGB_FILTER_ALPHA = 0.3f;
@@ -59,7 +64,7 @@ int ir_norm[SENSOR_COUNT] = {0, 0, 0, 0}; // 0-1000
 
 // --- LOOP TIMING ---
 unsigned long lastLoop = 0;
-const unsigned long LOOP_INTERVAL = 10; // ms
+const unsigned long LOOP_INTERVAL = 5; // ms
 
 // --- FUNCTION DECLARATIONS ---
 void setupMotors();
@@ -110,7 +115,7 @@ void loop() {
       // Xử lý đặc biệt, ví dụ: stop(); return;
     }
 
-    applyMotorSpeed(correction);
+    applyMotorSpeed(error, correction);
     tunePID();
   }
 }
@@ -231,15 +236,40 @@ float computePID(float error) {
   return output;
 }
 
-// --- Motor Control (PID-based, smooth) ---
-void applyMotorSpeed(float correction) {
-  // Correction is in range ~[-3,3], scale accordingly
-  int left_speed = BASE_SPEED + correction * CORRECTION_SCALE;
-  int right_speed = BASE_SPEED - correction * CORRECTION_SCALE;
+// --- Motor Control (PID-based, smooth, DYNAMIC SPEED) ---
+void applyMotorSpeed(float error, float correction) { // Thêm error vào tham số hàm
+
+  // --- Dynamic Base Speed Calculation ---
+  float abs_error = abs(error);
+  int current_base_speed;
+
+  // Map the absolute error to the base speed range
+  // If error is small (<= MAX_ERROR_FOR_HIGH_SPEED), use MAX_STRAIGHT_SPEED
+  // If error is large (>= MIN_ERROR_FOR_LOW_SPEED), use CORNERING_SPEED
+  // Linearly interpolate between the two speeds in the transition zone
+  current_base_speed = map(abs_error * 100, // Nhân 100 để dùng map với số nguyên
+                           MAX_ERROR_FOR_HIGH_SPEED * 100,
+                           MIN_ERROR_FOR_LOW_SPEED * 100,
+                           MAX_STRAIGHT_SPEED,
+                           CORNERING_SPEED);
+
+  // Constrain the calculated speed to the defined limits
+  current_base_speed = constrain(current_base_speed, CORNERING_SPEED, MAX_STRAIGHT_SPEED);
+
+  // --- Apply Correction ---
+  // Correction is scaled by CORRECTION_SCALE
+  int left_speed = current_base_speed + correction * CORRECTION_SCALE;
+  int right_speed = current_base_speed - correction * CORRECTION_SCALE;
+
+  // Constrain final speeds to PWM limits
   left_speed = constrain(left_speed, 0, MAX_PWM);
   right_speed = constrain(right_speed, 0, MAX_PWM);
+
   setMotorSpeeds(left_speed, right_speed);
+
   #if DEBUG
+    // Thêm current_base_speed vào log nếu muốn theo dõi
+    // Ví dụ: Serial.print(current_base_speed); Serial.print(",");
     Serial.print(left_speed); Serial.print(",");
     Serial.println(right_speed);
   #endif

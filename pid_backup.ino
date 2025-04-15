@@ -10,15 +10,20 @@
 #define LOG_CALIB  3
 
 const float SCALE_RIGHT_MOTOR = 0.999;
-const float Kp_default = 0.5;
+const float Kp_default = 0.222; //Ku: 0.222
 const float Ki_default = 0.0;
-const float Kd_default = 0.11;
+const float Kd_default = 0.2;
 const float INTEGRAL_MAX = 50.0f;
+
+const int MAX_STRAIGHT_SPEED = 245; // Tốc độ tối đa mong muốn trên đường thẳng (để lại chút headroom)
+const int CORNERING_SPEED = 190;    // Tốc độ cơ bản an toàn khi vào cua hoặc hiệu chỉnh mạnh
+const float MAX_ERROR_FOR_HIGH_SPEED = 0.5; // Ngưỡng lỗi tối đa để còn chạy tốc độ cao (cần tune)
+const float MIN_ERROR_FOR_LOW_SPEED = 1.5;  // Ngưỡng lỗi tối thiểu để chắc chắn chạy tốc độ thấp (cần tune)
 
 const int PWM_FREQ = 20000;
 const int PWM_RES = 8;
 const int MAX_PWM = 255;
-const int BASE_SPEED = 180;
+const int BASE_SPEED = 190;
 const int CORRECTION_SCALE = 100;
 const float IR_WEIGHT = 0.22;
 const float RGB_FILTER_ALPHA = 0.3f;
@@ -59,7 +64,7 @@ int ir_norm[SENSOR_COUNT] = {0, 0, 0, 0}; // 0-1000
 
 // --- LOOP TIMING ---
 unsigned long lastLoop = 0;
-const unsigned long LOOP_INTERVAL = 10; // ms
+const unsigned long LOOP_INTERVAL = 5; // ms
 
 // --- FUNCTION DECLARATIONS ---
 void setupMotors();
@@ -71,6 +76,7 @@ float computePID(float error);
 void applyMotorSpeed(float correction);
 void tunePID();
 void debugLog(uint8_t level, String msg);
+bool detectNonWhiteLine();
 
 // --- SETUP ---
 void setup() {
@@ -99,19 +105,18 @@ void loop() {
   unsigned long now = millis();
   if (now - lastLoop >= LOOP_INTERVAL) {
     lastLoop = now;
-    #if DEBUG
-      unsigned long t0 = micros();
-    #endif
 
     float error = computeError();
     float correction = computePID(error);
-    applyMotorSpeed(correction);
-    tunePID();
 
-    #if DEBUG
-      unsigned long t1 = micros();
-      Serial.print(t1 - t0); Serial.print(",");
-    #endif
+    // Nếu phát hiện line màu khác trắng (ví dụ vạch dừng)
+    if (detectNonWhiteLine()) {
+      debugLog(LOG_INFO, "Non-white line detected!");
+      // Xử lý đặc biệt, ví dụ: stop(); return;
+    }
+
+    applyMotorSpeed(error, correction);
+    tunePID();
   }
 }
 
@@ -186,42 +191,23 @@ void readIRSensors() {
   }
 }
 
-// --- Error Calculation (Weighted Center) ---
+// --- Error Calculation (Weighted Center, IR only) ---
 float computeError() {
-  // 1. Read RGB sensor (with filtering)
-  uint16_t c, r, g, b;
-  digitalWrite(W_LED_ON, 1);
-  rgbSensor.getRawData(&r, &g, &b, &c);
-  digitalWrite(W_LED_ON, 1);
-
-  // Exponential filter for C channel
-  c_filtered = (uint16_t)(RGB_FILTER_ALPHA * c + (1.0f - RGB_FILTER_ALPHA) * c_filtered);
-
-  // Normalize C channel (0=black, 1000=white)
-  int c_norm = map(c_filtered, rgb_min, rgb_max, 0, SENSOR_NORM_MAX);
-  c_norm = constrain(c_norm, 0, SENSOR_NORM_MAX);
-
-  // 2. Read and normalize IR sensors
+  // 1. Read and normalize IR sensors
   readIRSensors();
 
-  // 3. Weighted error calculation (centered at 0)
-  // Sensor positions: -3, -1, +1, +3 (left to right)
-  int weights[SENSOR_COUNT+1] = {-3, -1, 0, 1, 3}; // Center is RGB
-  int sensors[SENSOR_COUNT+1] = {ir_norm[0], ir_norm[1], c_norm, ir_norm[2], ir_norm[3]};
+  // 2. Weighted error calculation (centered at 0)
+  // Sensor positions: 3, 1, -1, -3 (left to right)
+  int weights[SENSOR_COUNT] = {3, 1, -1, -3};
   int sum = 0, total = 0;
-  for (int i = 0; i < 5; i++) {
-    sum += sensors[i] * weights[i];
-    total += sensors[i];
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    sum += ir_norm[i] * weights[i];
+    total += ir_norm[i];
   }
   float error = 0;
   if (total > 0) error = (float)sum / total;
 
   #if DEBUG
-    Serial.print(c_filtered); Serial.print(",");
-    Serial.print(r); Serial.print(",");
-    Serial.print(g); Serial.print(",");
-    Serial.print(b); Serial.print(",");
-    Serial.print(c_norm); Serial.print(",");
     for (int i = 0; i < SENSOR_COUNT; i++) {
       Serial.print(ir_raw[i]); Serial.print(",");
     }
@@ -250,14 +236,30 @@ float computePID(float error) {
   return output;
 }
 
-// --- Motor Control (PID-based, smooth) ---
-void applyMotorSpeed(float correction) {
-  // Correction is in range ~[-3,3], scale accordingly
-  int left_speed = BASE_SPEED + correction * CORRECTION_SCALE;
-  int right_speed = BASE_SPEED - correction * CORRECTION_SCALE;
+// --- Motor Control (PID-based, smooth, ***FIXED SPEED FOR TUNING***) ---
+void applyMotorSpeed(float error, float correction) {
+
+  // --- *** TEMPORARILY USE FIXED BASE SPEED FOR TUNING *** ---
+  int current_base_speed = CORNERING_SPEED; // Hoặc dùng const int BASE_SPEED = 180; nếu muốn
+  // Bỏ qua hoặc comment out phần map() và constrain cho current_base_speed
+  /*
+  float abs_error = abs(error);
+  current_base_speed = map(abs_error * 100, // Nhân 100 để dùng map với số nguyên
+                           MAX_ERROR_FOR_HIGH_SPEED * 100,
+                           MIN_ERROR_FOR_LOW_SPEED * 100,
+                           MAX_STRAIGHT_SPEED,
+                           CORNERING_SPEED);
+  current_base_speed = constrain(current_base_speed, CORNERING_SPEED, MAX_STRAIGHT_SPEED);
+  */
+  // --- Apply Correction ---
+  int left_speed = current_base_speed + correction * CORRECTION_SCALE;
+  int right_speed = current_base_speed - correction * CORRECTION_SCALE;
+
   left_speed = constrain(left_speed, 0, MAX_PWM);
   right_speed = constrain(right_speed, 0, MAX_PWM);
+
   setMotorSpeeds(left_speed, right_speed);
+
   #if DEBUG
     Serial.print(left_speed); Serial.print(",");
     Serial.println(right_speed);
@@ -290,4 +292,16 @@ void setMotorSpeeds(int left, int right) {
     ledcWriteChannel(left_motor_channel_b, 0);
     ledcWriteChannel(right_motor_channel_a, right);
     ledcWriteChannel(right_motor_channel_b, 0);
+}
+
+// --- Color Detection (use in loop if needed) ---
+bool detectNonWhiteLine() {
+  uint16_t c, r, g, b;
+  rgbSensor.getRawData(&r, &g, &b, &c);
+  // Exponential filter nếu muốn
+  c_filtered = (uint16_t)(RGB_FILTER_ALPHA * c + (1.0f - RGB_FILTER_ALPHA) * c_filtered);
+  int c_norm = map(c_filtered, rgb_min, rgb_max, 0, SENSOR_NORM_MAX);
+  c_norm = constrain(c_norm, 0, SENSOR_NORM_MAX);
+  // Nếu c_norm < 700 (ví dụ), tức là không phải nền trắng
+  return (c_norm < 700);
 }
