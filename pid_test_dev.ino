@@ -9,26 +9,32 @@
 #define LOG_PID 2
 #define LOG_CALIB 3
 
-#define RGB_CHECKING 0 // 1: kiểm tra màu sắc
-#define ENABLE_BYPASS_INTERSECTION 1    // Đặt 0 nếu tắt bypass
-#define ENABLE_HIGH_SPEED_ON_STRAIGHT 1 // 0: Không kích hoạt HIGH_SPEED
-#define THREADSOLD_BLACK 300
+#define RGB_CHECKING 0                  // 1: kiểm tra màu sắc, 0: không kiểm tra
+#define ENABLE_BYPASS_INTERSECTION 1    // Đặt 0 nếu muốn tắt tính năng này
+#define ENABLE_HIGH_SPEED_ON_STRAIGHT 1 // 0: luôn chạy tốc độ CORNERING_SPEED
 
-const float SCALE_RIGHT_MOTOR = 0.999;
-const float Kp_default = 2.25;
-const float Ki_default = 0.001;
-const float Kd_default = 6.5;
+const float SCALE_RIGHT_MOTOR = 1.001;
+const float Kp_default = 0.235;
+const float Ki_default = 0.0;
+const float Kd_default = 3;
+const float ERROR_DEADBAND = 0.5; // Khoảng chết, error nhỏ hơn giá trị này sẽ coi như 0
 const float INTEGRAL_MAX = 50.0f;
 
+const int BASE_SPEED = 230;
 const int MAX_STRAIGHT_SPEED = 255;         // Tốc độ tối đa mong muốn trên đường thẳng (để lại chút headroom)
-const int CORNERING_SPEED = 245;            // Tốc độ cơ bản an toàn khi vào cua hoặc hiệu chỉnh mạnh
-const float MAX_ERROR_FOR_HIGH_SPEED = 1; // Ngưỡng lỗi tối đa để còn chạy tốc độ cao (cần tune)
+const int CORNERING_SPEED = 230;            // Tốc độ cơ bản an toàn khi vào cua hoặc hiệu chỉnh mạnh
+const float MAX_ERROR_FOR_HIGH_SPEED = 0.5; // Ngưỡng lỗi tối đa để còn chạy tốc độ cao (cần tune)
 const float MIN_ERROR_FOR_LOW_SPEED = 1.5;  // Ngưỡng lỗi tối thiểu để chắc chắn chạy tốc độ thấp (cần tune)
+
+// --- CONFIGURABLE THRESHOLDS ---
+#define USE_DYNAMIC_THRESHOLD 1          // 1: dùng ngưỡng động từ calibration, 0: dùng ngưỡng mặc định
+const int DEFAULT_BLACK_THRESHOLD = 200; // Giá trị mặc định nếu không dùng calibration
+const int DEFAULT_WHITE_THRESHOLD = 400; // Giá trị mặc định nếu không dùng calibration
 
 const int PWM_FREQ = 20000;
 const int PWM_RES = 8;
 const int MAX_PWM = 255;
-const int CORRECTION_SCALE = 60; // Giảm để tránh giật cục (có thể thử 40-80)
+const int CORRECTION_SCALE = 80; // Giảm để tránh giật cục (có thể thử 40-80)
 const float IR_WEIGHT = 0.22;
 const float RGB_FILTER_ALPHA = 0.3f;
 
@@ -65,10 +71,12 @@ float last_error = 0, integral = 0;
 uint16_t c_filtered = 0;
 int ir_raw[SENSOR_COUNT] = {0, 0, 0, 0};
 int ir_norm[SENSOR_COUNT] = {0, 0, 0, 0}; // 0-1000
+float smoothed_base_speed = BASE_SPEED;
+const float SPEED_SMOOTH_ALPHA = 0.22; // 0.1~0.3, càng nhỏ càng mượt
 
 // --- LOOP TIMING ---
 unsigned long lastLoop = 0;
-const unsigned long LOOP_INTERVAL = 1; // ms
+const unsigned long LOOP_INTERVAL = 2; // ms
 
 // --- FUNCTION DECLARATIONS ---
 void setupMotors();
@@ -77,12 +85,21 @@ void readIRSensors();
 void calibrateSensors();
 float computeError();
 float computePID(float error);
+float computePID_dynamic(float error, float anticipation, float Kp_dyn, float Kd_dyn);
 void applyMotorSpeed(float error, float correction);
 void tunePID();
 void debugLog(uint8_t level, String msg);
 bool detectNonWhiteLine();
 bool isAllIRBlack();
+bool anticipationRight();
+bool anticipationLeft();
+bool isRightIntersection();
 void bypassIntersection();
+void bypassRightIntersection();
+float getDynamicKp(float error, bool sharp_turn);
+float getDynamicKd(float error, bool sharp_turn);
+int getBlackThreshold(int sensor_idx);
+int getWhiteThreshold(int sensor_idx);
 
 // --- SETUP ---
 void setup()
@@ -115,34 +132,82 @@ void setup()
 }
 
 // --- MAIN LOOP ---
+unsigned long bypass_start_time = 0;
+bool bypassing = false;
+
+void bypassRightIntersection()
+{
+  // Tạo bản sao mảng ir_norm và ép IR1, IR2 thành trắng
+  int ir_bypass[SENSOR_COUNT];
+  for (int i = 0; i < SENSOR_COUNT; i++)
+    ir_bypass[i] = ir_norm[i];
+  ir_bypass[0] = SENSOR_NORM_MAX;
+  ir_bypass[1] = SENSOR_NORM_MAX;
+
+  // Tính error chỉ dựa vào IR3, IR4
+  int weights[SENSOR_COUNT] = {3, 1, -1, -3}; // hoặc đúng chiều bạn đang dùng
+  int sum = 0, total = 0;
+  for (int i = 0; i < SENSOR_COUNT; i++)
+  {
+    sum += ir_bypass[i] * weights[i];
+    total += ir_bypass[i];
+  }
+  float error = 0;
+  if (total > 0)
+    error = (float)sum / total;
+
+  // PID động khi bypass (có thể tăng Kp, giảm Kd nếu muốn rẽ mạnh hơn)
+  float Kp_dyn = Kp * 1.2;
+  float Kd_dyn = Kd * 0.7;
+  float anticipation = 1.2; // boost phải
+  float correction = computePID_dynamic(error, anticipation, Kp_dyn, Kd_dyn);
+
+  applyMotorSpeed(error, correction);
+}
+
 void loop()
 {
   unsigned long t0 = micros();
-
   unsigned long now = millis();
+
+  if (bypassing)
+  {
+    bypassRightIntersection();
+    // Thoát bypass khi IR3 hoặc IR4 không còn nhận line hoặc timeout
+    if (!(ir_norm[2] < getBlackThreshold(2) && ir_norm[3] < getBlackThreshold(3)) ||
+        (now - bypass_start_time > 600))
+    {
+      bypassing = false;
+    }
+    return;
+  }
+
   if (now - lastLoop >= LOOP_INTERVAL)
   {
     lastLoop = now;
 
     float error = computeError();
-    float correction = computePID(error);
+    bool sharp_turn = (ir_norm[0] < getBlackThreshold(0) && ir_norm[1] < getWhiteThreshold(1)) ||
+                      (ir_norm[2] < getWhiteThreshold(2) && ir_norm[3] < getBlackThreshold(3));
 
-#if ENABLE_BYPASS_INTERSECTION
-    if (isAllIRBlack())
+    float Kp_dyn = getDynamicKp(error, sharp_turn);
+    float Kd_dyn = getDynamicKd(error, sharp_turn);
+
+    float anticipation_boost = 0;
+    if (anticipationRight())
+      anticipation_boost = 1.2;
+    if (anticipationLeft())
+      anticipation_boost = -1.2;
+
+    // Khi phát hiện giao lộ phải, bật bypass
+    if (isRightIntersection())
     {
-      debugLog(LOG_INFO, "Bypass intersection: hard right");
-      bypassIntersection();
+      bypassing = true;
+      bypass_start_time = now;
       return;
     }
-#endif
 
-#if RGB_CHECKING // RGB_CHECKING
-    if (detectNonWhiteLine())
-    {
-      debugLog(LOG_INFO, "Non-white line detected!");
-      // stop(); return;
-    }
-#endif
+    float correction = computePID_dynamic(error, anticipation_boost, Kp_dyn, Kd_dyn);
     applyMotorSpeed(error, correction);
     tunePID();
 
@@ -293,6 +358,10 @@ float computeError()
 // --- PID Controller ---
 float computePID(float error)
 {
+  // Deadband: Nếu error nhỏ, coi như 0 để tránh robot lắc nhẹ liên tục
+  if (abs(error) < ERROR_DEADBAND)
+    error = 0;
+
   // Chỉ tích luỹ integral khi robot ở gần line (|error| nhỏ)
   if (abs(error) < 1.0)
   {
@@ -307,15 +376,19 @@ float computePID(float error)
     integral = 0;
   }
 
+  bool sharp_turn = (ir_norm[0] < 200 && ir_norm[1] < 400) || (ir_norm[2] < 400 && ir_norm[3] < 200);
+  float dynamic_Kp = getDynamicKp(error, sharp_turn);
+  float dynamic_Kd = getDynamicKd(error, sharp_turn);
+
   float derivative = error - last_error;
-  float output = Kp * error + Ki * integral + Kd * derivative;
+  float output = dynamic_Kp * error + Ki * integral + dynamic_Kd * derivative;
   last_error = error;
 #if DEBUG
-  Serial.print(Kp * error, 4);
+  Serial.print(dynamic_Kp * error, 4);
   Serial.print(",");
   Serial.print(Ki * integral, 4);
   Serial.print(",");
-  Serial.print(Kd * derivative, 4);
+  Serial.print(dynamic_Kd * derivative, 4);
   Serial.print(",");
   Serial.print(output, 4);
   Serial.print(",");
@@ -323,46 +396,72 @@ float computePID(float error)
   return output;
 }
 
+// PID động với anticipation
+float computePID_dynamic(float error, float anticipation, float Kp_dyn, float Kd_dyn)
+{
+  static float last_error = 0, integral = 0;
+  if (abs(error) < ERROR_DEADBAND)
+    error = 0;
+  if (abs(error) < 1.0)
+  {
+    integral += error;
+    integral = constrain(integral, -INTEGRAL_MAX, INTEGRAL_MAX);
+  }
+  if ((error * last_error < 0) || (abs(error) > 2.5))
+    integral = 0;
+  float derivative = error - last_error;
+  float output = Kp_dyn * error + Ki * integral + Kd_dyn * derivative + anticipation;
+  last_error = error;
+  return output;
+}
+
 // --- Motor Control (PID-based, smooth, DYNAMIC SPEED, auto slow on sharp turn) ---
 void applyMotorSpeed(float error, float correction)
 {
   float abs_error = abs(error);
-  int current_base_speed;
+  int target_base_speed;
 
-  // Phát hiện góc cua gắt: 2 cảm biến ngoài cùng đều nhận line (giá trị thấp)
+  // Pattern giảm tốc chỉ khi thực sự cần thiết (ví dụ: 2 cảm biến ngoài cùng đều nhận line)
   bool sharp_turn = (ir_norm[0] < 200 && ir_norm[1] < 400) || (ir_norm[2] < 400 && ir_norm[3] < 200);
 
 #if ENABLE_HIGH_SPEED_ON_STRAIGHT
   if (sharp_turn)
   {
-    current_base_speed = CORNERING_SPEED - 30; // Giảm tốc mạnh hơn khi cua gắt
+    target_base_speed = CORNERING_SPEED - 30;
   }
   else if (abs_error <= MAX_ERROR_FOR_HIGH_SPEED)
   {
-    current_base_speed = MAX_STRAIGHT_SPEED;
+    target_base_speed = MAX_STRAIGHT_SPEED;
   }
   else if (abs_error >= MIN_ERROR_FOR_LOW_SPEED)
   {
-    current_base_speed = CORNERING_SPEED;
+    target_base_speed = CORNERING_SPEED;
   }
   else
   {
-    current_base_speed = map(abs_error * 100,
-                             MAX_ERROR_FOR_HIGH_SPEED * 100,
-                             MIN_ERROR_FOR_LOW_SPEED * 100,
-                             MAX_STRAIGHT_SPEED,
-                             CORNERING_SPEED);
-    current_base_speed = constrain(current_base_speed, CORNERING_SPEED, MAX_STRAIGHT_SPEED);
+    target_base_speed = map(abs_error * 100,
+                            MAX_ERROR_FOR_HIGH_SPEED * 100,
+                            MIN_ERROR_FOR_LOW_SPEED * 100,
+                            MAX_STRAIGHT_SPEED,
+                            CORNERING_SPEED);
+    target_base_speed = constrain(target_base_speed, CORNERING_SPEED, MAX_STRAIGHT_SPEED);
   }
 #else
-  current_base_speed = CORNERING_SPEED;
+  target_base_speed = CORNERING_SPEED;
 #endif
 
-  // Giới hạn correction để tránh oversteer
+  // Exponential smoothing cho tốc độ cơ sở
+  smoothed_base_speed = SPEED_SMOOTH_ALPHA * target_base_speed + (1.0 - SPEED_SMOOTH_ALPHA) * smoothed_base_speed;
+
+  // Correction tối ưu cho cua gắt: tăng hệ số khi cua mạnh để bám sát mép line
+  float dynamic_correction_scale = CORRECTION_SCALE;
+  if (sharp_turn)
+    dynamic_correction_scale *= 1.25; // Tăng correction khi cua gắt
+
   correction = constrain(correction, -2.5, 2.5);
 
-  int left_speed = current_base_speed + correction * CORRECTION_SCALE;
-  int right_speed = current_base_speed - correction * CORRECTION_SCALE;
+  int left_speed = smoothed_base_speed + correction * dynamic_correction_scale;
+  int right_speed = smoothed_base_speed - correction * dynamic_correction_scale;
   left_speed = constrain(left_speed, 0, MAX_PWM);
   right_speed = constrain(right_speed, 0, MAX_PWM);
 
@@ -427,18 +526,75 @@ bool detectNonWhiteLine()
 // --- Intersection Bypass: hard right (góc vuông) ---
 bool isAllIRBlack()
 {
-  return (ir_norm[0] < THREADSOLD_BLACK && ir_norm[1] < THREADSOLD_BLACK && ir_norm[2] < THREADSOLD_BLACK && ir_norm[3] < THREADSOLD_BLACK);
-  // for (int i = 0; i < SENSOR_COUNT; i++)
-  // {
-  //   if (ir_norm[i] > 200)
-  //     return false; // 200 là ngưỡng, có thể chỉnh
-  // }
-  // return true;
+  for (int i = 0; i < SENSOR_COUNT; i++)
+  {
+    if (ir_norm[i] > getBlackThreshold(i))
+      return false;
+  }
+  return true;
 }
 
 void bypassIntersection()
 {
   // Dừng trái, phải chạy tốc độ cao, delay lâu hơn
-  setMotorSpeeds(MAX_PWM,0);
-  delay(500); // Có thể tăng lên 400ms nếu cần
+  setMotorSpeeds(0, MAX_PWM);
+  delay(600); // Có thể tăng lên 400ms nếu cần
+}
+
+// --- Dynamic PID ---
+float getDynamicKp(float error, bool sharp_turn)
+{
+  if (sharp_turn)
+    return Kp * 1.2; // tăng Kp khi cua gắt
+  if (abs(error) < 0.3)
+    return Kp * 0.7; // giảm Kp khi đi thẳng
+  return Kp;
+}
+
+float getDynamicKd(float error, bool sharp_turn)
+{
+  if (sharp_turn)
+    return Kd * 0.7; // giảm Kd khi cua gắt để robot linh hoạt hơn
+  if (abs(error) < 0.3)
+    return Kd * 1.3; // tăng Kd khi đi thẳng để robot ổn định, không lắc
+  return Kd;
+}
+
+// --- Anticipation and Intersection Detection ---
+bool anticipationRight()
+{
+  // IR3 (phải trong) nhận line, IR4 (phải ngoài) chưa nhận line
+  return (ir_norm[2] < getBlackThreshold(2) && ir_norm[3] > getWhiteThreshold(3));
+}
+
+bool anticipationLeft()
+{
+  // IR2 (trái trong) nhận line, IR1 (trái ngoài) chưa nhận line
+  return (ir_norm[1] < getBlackThreshold(1) && ir_norm[0] > getWhiteThreshold(0));
+}
+
+bool isRightIntersection()
+{
+  return (ir_norm[2] < getBlackThreshold(2) && ir_norm[3] < getBlackThreshold(3));
+}
+
+// --- Threshold Calculation ---
+int getBlackThreshold(int sensor_idx)
+{
+#if USE_DYNAMIC_THRESHOLD
+  // Ngưỡng black = trung bình giữa min và min+20% khoảng min-max
+  return ir_min[sensor_idx] + (ir_max[sensor_idx] - ir_min[sensor_idx]) * 0.2;
+#else
+  return DEFAULT_BLACK_THRESHOLD;
+#endif
+}
+
+int getWhiteThreshold(int sensor_idx)
+{
+#if USE_DYNAMIC_THRESHOLD
+  // Ngưỡng white = min + 40% khoảng min-max
+  return ir_min[sensor_idx] + (ir_max[sensor_idx] - ir_min[sensor_idx]) * 0.4;
+#else
+  return DEFAULT_WHITE_THRESHOLD;
+#endif
 }
