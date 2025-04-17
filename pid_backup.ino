@@ -10,20 +10,20 @@
 #define LOG_CALIB 3
 
 #define RGB_CHECKING 0 // 1: kiểm tra màu sắc
-#define ENABLE_BYPASS_INTERSECTION 1    // Đặt 0 nếu tắt bypass
+#define ENABLE_BYPASS_INTERSECTION 0    // Đặt 0 nếu tắt bypass
 #define ENABLE_HIGH_SPEED_ON_STRAIGHT 1 // 0: Không kích hoạt HIGH_SPEED
 #define THREADSOLD_BLACK 300
 
-const float SCALE_RIGHT_MOTOR = 0.999;
-const float Kp_default = 2.25;
-const float Ki_default = 0.001;
-const float Kd_default = 6.5;
-const float INTEGRAL_MAX = 50.0f;
+const float SCALE_RIGHT_MOTOR = 0.998;
+const float Kp_default = 3.67; //2.91
+const float Ki_default = 0.02;
+const float Kd_default = 40; //10 is ok
+const float INTEGRAL_MAX = 70.0f;
 
-const int MAX_STRAIGHT_SPEED = 255;         // Tốc độ tối đa mong muốn trên đường thẳng (để lại chút headroom)
-const int CORNERING_SPEED = 245;            // Tốc độ cơ bản an toàn khi vào cua hoặc hiệu chỉnh mạnh
-const float MAX_ERROR_FOR_HIGH_SPEED = 1; // Ngưỡng lỗi tối đa để còn chạy tốc độ cao (cần tune)
-const float MIN_ERROR_FOR_LOW_SPEED = 1.5;  // Ngưỡng lỗi tối thiểu để chắc chắn chạy tốc độ thấp (cần tune)
+const int MAX_STRAIGHT_SPEED = 245;         // Tốc độ tối đa mong muốn trên đường thẳng (để lại chút headroom)
+const int CORNERING_SPEED = 212;            // Tốc độ cơ bản an toàn khi vào cua hoặc hiệu chỉnh mạnh
+const float MAX_ERROR_FOR_HIGH_SPEED = 3; // Ngưỡng lỗi tối đa để còn chạy tốc độ cao (cần tune)
+const float MIN_ERROR_FOR_LOW_SPEED = 3.5;  // Ngưỡng lỗi tối thiểu để chắc chắn chạy tốc độ thấp (cần tune)
 
 const int PWM_FREQ = 20000;
 const int PWM_RES = 8;
@@ -440,5 +440,5 @@ void bypassIntersection()
 {
   // Dừng trái, phải chạy tốc độ cao, delay lâu hơn
   setMotorSpeeds(MAX_PWM,0);
-  delay(500); // Có thể tăng lên 400ms nếu cần
+  delay(520); // Có thể tăng lên 400ms nếu cần
 }
