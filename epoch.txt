@@ -1,3 +1,22 @@
+=======================18.47===========================================
+const float SCALE_RIGHT_MOTOR = 0.998;
+const float Kp_default = 3.67; //2.91
+const float Ki_default = 0.02;
+const float Kd_default = 40; //10 is ok
+const float INTEGRAL_MAX = 70.0f;
+
+const int MAX_STRAIGHT_SPEED = 245;         // Tốc độ tối đa mong muốn trên đường thẳng (để lại chút headroom)
+const int CORNERING_SPEED = 212;            // Tốc độ cơ bản an toàn khi vào cua hoặc hiệu chỉnh mạnh
+const float MAX_ERROR_FOR_HIGH_SPEED = 3; // Ngưỡng lỗi tối đa để còn chạy tốc độ cao (cần tune)
+const float MIN_ERROR_FOR_LOW_SPEED = 3.5;  // Ngưỡng lỗi tối thiểu để chắc chắn chạy tốc độ thấp (cần tune)
+
+const int PWM_FREQ = 20000;
+const int PWM_RES = 8;
+const int MAX_PWM = 255;
+const int CORRECTION_SCALE = 60; // Giảm để tránh giật cục (có thể thử 40-80)
+const float IR_WEIGHT = 0.22;
+const float RGB_FILTER_ALPHA = 0.3f;
+=======================================================================
 
 
 ==========================BLE&bypass new-NON TEST=================================
@@ -625,21 +644,3 @@ void checkBypassCompletion()
 =======================================================================
 
 
-=======================18.47===========================================
-const float SCALE_RIGHT_MOTOR = 0.998;
-const float Kp_default = 3.67; //2.91
-const float Ki_default = 0.02;
-const float Kd_default = 40; //10 is ok
-const float INTEGRAL_MAX = 70.0f;
-
-const int MAX_STRAIGHT_SPEED = 245;         // Tốc độ tối đa mong muốn trên đường thẳng (để lại chút headroom)
-const int CORNERING_SPEED = 212;            // Tốc độ cơ bản an toàn khi vào cua hoặc hiệu chỉnh mạnh
-const float MAX_ERROR_FOR_HIGH_SPEED = 3; // Ngưỡng lỗi tối đa để còn chạy tốc độ cao (cần tune)
-const float MIN_ERROR_FOR_LOW_SPEED = 3.5;  // Ngưỡng lỗi tối thiểu để chắc chắn chạy tốc độ thấp (cần tune)
-
-const int PWM_FREQ = 20000;
-const int PWM_RES = 8;
-const int MAX_PWM = 255;
-const int CORRECTION_SCALE = 60; // Giảm để tránh giật cục (có thể thử 40-80)
-const float IR_WEIGHT = 0.22;
-const float RGB_FILTER_ALPHA = 0.3f;
