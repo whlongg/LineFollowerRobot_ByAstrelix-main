@@ -13,3 +13,8 @@
 | threshblk=[value] | Threshold Black            | threshblk=350| Sets threadshold_black (integer). IR value below this is considered black. |
 | getpid     | (N/A)                         | getpid       | Requests the current Kp, Ki, Kd values via notification.                    |
 | getall     | (N/A)                         | getall       | Requests all current tunable values via notification.                       |
+
+
+|Tham số | Tác dụng | Khoảng đề xuất | |---------|----------|----------------| | IR_FILTER_ALPHA | Alpha nhỏ ⇒ mượt, lớn ⇒ nhạy. | 0.3 – 0.6 | | FIXED_TURN_DURATION_MS | Thời gian xoay 90°. | 450 – 600 ms | | SEARCH_TIMEOUT_MS | Thoát an toàn khi không tìm thấy vạch. | 800 – 1500 ms | | THRESHOLD_BLACK | Giá trị ≤ coi như màu đen. | 250 – 400 | | maxStraightSpeed / corneringSpeed | Tốc độ thẳng / cua. | 230‑255 / 180‑220 | | correctionScale | Lớn ⇒ chênh tốc bánh nhỏ. | 40 – 80 |
+
+Bắt đầu với mặc định, gửi lệnh TUNE để tự lấy PID, sau đó tăng nhẹ KI để giảm sai số dừng.

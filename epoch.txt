@@ -1,3 +1,40 @@
+
+
+=========================20.28=========================================
+#define RGB_CHECKING 0                  // 1: kiểm tra màu sắc
+#define ENABLE_BYPASS_INTERSECTION 0    // Đặt 0 nếu tắt bypass
+#define ENABLE_HIGH_SPEED_ON_STRAIGHT 0 // 0: Không kích hoạt HIGH_SPEED
+#define THREADSOLD_BLACK 300
+
+const float SCALE_RIGHT_MOTOR = 1.002;
+const float Kp_default = 1.8;
+const float Ki_default = 0.001;
+const float Kd_default = 15;
+const float INTEGRAL_MAX = 70.0f;
+
+// --- Tunable Parameters (Defaults) ---
+int max_straight_speed = 240;             // Max speed on straights (leave headroom)
+int cornering_speed = 212;                // Base speed for corners or large corrections
+float max_error_for_high_speed = 2.5;     // Error must be BELOW this to use max_straight_speed. Lower value = stricter condition for high speed.
+float min_error_for_low_speed = 3.5;      // Error must be ABOVE this to force cornering_speed. Higher value = more tolerant before slowing down.
+int sharp_turn_speed_reduction = 30;      // Amount to reduce speed further during detected sharp turns.
+int correction_scale = 40;                // Scales PID output to motor speed difference (Tune: 40-80)
+unsigned long bypass_turn_duration = 520; // ms - Duration for the bypass turn
+int threadshold_black = 300;              // IR threshold to consider 'black' for intersection detection
+
+// --- TIMING ---
+unsigned long lastLoop = 0;
+const unsigned long LOOP_INTERVAL = 1; // loop timing ms
+const unsigned long BLE_LOG_INTERVAL_MS = 5; //BLE Log timing ms
+
+// --- Fixed Constants ---
+const int PWM_FREQ = 20000;
+const int PWM_RES = 8;
+const int MAX_PWM = 255;
+const float IR_WEIGHT = 0.22;
+const float RGB_FILTER_ALPHA = 0.3f;
+=======================================================================
+
 =======================18.47===========================================
 const float SCALE_RIGHT_MOTOR = 0.998;
 const float Kp_default = 3.67; //2.91

@@ -6,7 +6,7 @@
 #include <BLE2902.h>
 
 // --- CONFIGURABLE CONSTANTS ---
-#define DEBUG 1
+#define DEBUG 0
 
 #define LOG_INFO 0
 #define LOG_ERROR 1
@@ -21,7 +21,7 @@
 const float SCALE_RIGHT_MOTOR = 1.002;
 const float Kp_default = 1.8; // 2.91
 const float Ki_default = 0.001;
-const float Kd_default = 9;
+const float Kd_default = 11;
 const float INTEGRAL_MAX = 70.0f;
 
 // --- Tunable Parameters (Defaults) ---
@@ -87,8 +87,7 @@ uint16_t ir_max[SENSOR_COUNT] = {0, 0, 0, 0};
 enum RobotState
 {
   STATE_LINE_FOLLOWING,
-  STATE_BYPASSING,
-  STATE_TUNING // Added state for PID auto-tuning
+  STATE_BYPASSING
 };
 
 // --- GLOBALS ---
@@ -98,32 +97,10 @@ uint16_t c_filtered = 0;
 RobotState current_state = STATE_LINE_FOLLOWING;
 unsigned long bypass_start_time = 0;
 
-// --- PID Auto-Tuning Globals ---
-bool isAutoTuning = false; // Flag to indicate tuning process active
-unsigned long tuningStartTime = 0;
-float Ku = 0; // Ultimate Gain
-float Tu = 0; // Oscillation Period (ms)
-float originalKp, originalKi, originalKd; // To restore if tuning fails/times out
-const unsigned long TUNING_TIMEOUT = 2000; // Max tuning time in ms
-const float KP_INCREMENT = 0.1; // How much to increase Kp each step
-const unsigned long KP_INCREMENT_INTERVAL = 100; // Increase Kp every 100ms
-unsigned long lastKpIncreaseTime = 0;
-// Oscillation Detection Helpers
-int lastErrorSign = 0;
-int zeroCrossings = 0;
-unsigned long lastCrossingTime = 0;
-unsigned long firstCrossingTime = 0; // To calculate period
-const int REQUIRED_CROSSINGS = 6; // Need 3 full cycles for stable period measurement
-float peakError = 0;
-float troughError = -0; // Initialize with opposite sign for first comparison
-unsigned long periodSum = 0;
-
 // --- BLE Logging Globals ---
 float currentP = 0, currentI = 0, currentD = 0;
 int currentLeftSpeed = 0, currentRightSpeed = 0;
 unsigned long lastBleLogTime = 0; // Timer for throttling BLE logs
-
-// const unsigned long BYPASS_TURN_DURATION = 520; // Now a tunable variable above
 
 int ir_raw[SENSOR_COUNT] = {0, 0, 0, 0};
 int ir_norm[SENSOR_COUNT] = {0, 0, 0, 0}; // 0-1000
@@ -144,9 +121,6 @@ void notifyTuningValues(); // Renamed: Function to send ALL tuning values over B
 void debugLog(uint8_t level, String msg);
 bool detectNonWhiteLine();
 bool isAllIRBlack();
-void startAutoTuning(); // Added
-void processAutoTuning(); // Added
-// void bypassIntersection(); // Replaced by startBypassManeuver and checkBypassCompletion
 
 // --- SETUP ---
 void setup()
@@ -185,103 +159,79 @@ void loop()
   unsigned long t0 = micros();
   unsigned long now = millis();
 
-  if (now - lastLoop >= LOOP_INTERVAL)
-  {
-    lastLoop = now;
+  // Enforce loop timing
+  if (now - lastLoop < LOOP_INTERVAL) {
+    return;
+  }
+  lastLoop = now;
 
-    // --- State Machine Logic ---
-    switch (current_state)
-    {
+  // Read sensors
+  readIRSensors();
+
+  // State machine
+  switch (current_state) {
     case STATE_LINE_FOLLOWING:
     {
+      // Normal PID line following
       float error = computeError();
       float correction = computePID(error);
-
-#if ENABLE_BYPASS_INTERSECTION
-      if (isAllIRBlack())
-      {
-        debugLog(LOG_INFO, "Intersection detected, starting bypass.");
-        startBypassManeuver();
-        // Don't apply motor speed based on PID this cycle, bypass maneuver takes over
-      }
-      else
-      {
-        // Only apply PID motor speed if not starting a bypass
-        applyMotorSpeed(error, correction);
-      }
-#else
-      // If bypass is disabled, always apply PID motor speed
       applyMotorSpeed(error, correction);
-#endif // ENABLE_BYPASS_INTERSECTION
 
-#if RGB_CHECKING // RGB_CHECKING
-      if (detectNonWhiteLine())
-      {
-        debugLog(LOG_INFO, "Non-white line detected!");
-        // stop(); // Example action
+      // Check for intersection if enabled
+      if (ENABLE_BYPASS_INTERSECTION && isAllIRBlack()) {
+        startBypassManeuver();
       }
-#endif
+      break;
     }
-    break; // End STATE_LINE_FOLLOWING
 
     case STATE_BYPASSING:
       checkBypassCompletion();
-      // Skip normal line following while bypassing
-      break; // End STATE_BYPASSING
+      break;
+  }
 
-    case STATE_TUNING:
-      processAutoTuning(); // Handle the tuning logic
-      break; // End STATE_TUNING
+  // BLE connection management
+  if (deviceConnected && !oldDeviceConnected) {
+    // Connected
+    oldDeviceConnected = deviceConnected;
+    debugLog(LOG_INFO, "BLE device connected");
+  }
+  if (!deviceConnected && oldDeviceConnected) {
+    // Disconnected
+    oldDeviceConnected = deviceConnected;
+    pServer->startAdvertising(); // restart advertising
+    debugLog(LOG_INFO, "BLE device disconnected, start advertising");
+  }
 
-    } // End State Machine Switch
+  // --- BLE Real-time Data Logging (CSV Format) - Throttled ---
+  if (deviceConnected && pCharacteristicTX != NULL && (now - lastBleLogTime >= BLE_LOG_INTERVAL_MS))
+  {
+    lastBleLogTime = now; // Update the last log time
 
-    // --- BLE Real-time Data Logging (CSV Format) - Throttled ---
-    if (deviceConnected && pCharacteristicTX != NULL && (now - lastBleLogTime >= BLE_LOG_INTERVAL_MS))
-    {
-      lastBleLogTime = now; // Update the last log time
+    // New Format: IR_norm(ir0,ir1,ir2,ir3),Pid(kp,ki,kd),Error,Speed(left,right)\n
+    String logData = String(millis()) + "," +
+                String(ir_norm[0]) + "," +
+                String(ir_norm[1]) + "," +
+                String(ir_norm[2]) + "," +
+                String(ir_norm[3]) + "," +
+                String(Kp, 4) + "," +
+                String(Ki, 4) + "," +
+                String(Kd, 4) + "," +
+                String(last_error, 4) + "," +
+                String(currentLeftSpeed) + "," +
+                String(currentRightSpeed) + "\n";
 
-      // New Format: IR_norm(ir0,ir1,ir2,ir3),Pid(kp,ki,kd),Error,Speed(left,right)\n
-      String logData = String(millis()) + "," +
-                 String(ir_norm[0]) + "," +
-                 String(ir_norm[1]) + "," +
-                 String(ir_norm[2]) + "," +
-                 String(ir_norm[3]) + "," +
-                 String(Kp, 2) + "," +
-                 String(Ki, 4) + "," +
-                 String(Kd, 2) + "," +
-                 String(last_error, 4) + "," +
-                 String(currentLeftSpeed) + "," +
-                 String(currentRightSpeed) + "\n";
-
-
-
-      // Send data via BLE Notification
-      // Note: Ensure MTU is large enough or handle potential fragmentation if needed.
-      // For typical terminal apps, sending line by line should be okay.
-      pCharacteristicTX->setValue(logData.c_str());
-      pCharacteristicTX->notify();
-    }
-
-    // Handle BLE connection status changes (can happen in any state)
-    if (deviceConnected && !oldDeviceConnected)
-    {
-      oldDeviceConnected = deviceConnected;
-      debugLog(LOG_INFO, "BLE Device Connected");
-    }
-    if (!deviceConnected && oldDeviceConnected)
-    {
-      oldDeviceConnected = deviceConnected;
-      debugLog(LOG_INFO, "BLE Device Disconnected");
-      // Optional: Start advertising again if needed, depending on library behavior
-      // BLEDevice::startAdvertising();
-    }
+    // Send data via BLE Notification
+    // Note: Ensure MTU is large enough or handle potential fragmentation if needed.
+    // For typical terminal apps, sending line by line should be okay.
+    pCharacteristicTX->setValue(logData.c_str());
+    pCharacteristicTX->notify();
+  }
 
 #if DEBUG
-    unsigned long t1 = micros();
-    Serial.print("looptime_us=");
-    Serial.println(t1 - t0);
+  unsigned long t1 = micros();
+  Serial.print("looptime_us=");
+  Serial.println(t1 - t0);
 #endif
-  }
 }
 
 // --- Unified Debug Logging ---
@@ -653,12 +603,6 @@ void handleBLECommands(String cmd) // Changed parameter type to Arduino String
   {
     valueChanged = true; // Trigger notification without changing values
   }
-  else if (cmd.equalsIgnoreCase("TUNE")) // Command to start auto-tuning
-  {
-    startAutoTuning();
-    // valueChanged = false; // Don't notify all values immediately, tuning will do it
-  }
-
 
   if (valueChanged)
   {
@@ -783,178 +727,4 @@ void checkBypassCompletion()
   }
   // Keep turning while bypassing
   // setMotorSpeeds(MAX_PWM, 0); // Ensure motors stay on during bypass check - already set in startBypassManeuver
-}
-
-
-// --- PID Auto-Tuning Functions ---
-
-void startAutoTuning() {
-  if (current_state == STATE_TUNING) {
-    debugLog(LOG_INFO, "Tuning already in progress.");
-    return;
-  }
-
-  debugLog(LOG_INFO, "Starting PID Auto-Tuning...");
-
-  // Store original values
-  originalKp = Kp;
-  originalKi = Ki;
-  originalKd = Kd;
-
-  // Initialize ZN tuning parameters
-  Kp = 0.5; // Start with a small Kp value
-  Ki = 0;
-  Kd = 0;
-  integral = 0; // Reset PID state
-  last_error = 0;
-
-  // Reset tuning state variables
-  tuningStartTime = millis();
-  lastKpIncreaseTime = tuningStartTime;
-  Ku = 0;
-  Tu = 0;
-  zeroCrossings = 0;
-  lastCrossingTime = 0;
-  firstCrossingTime = 0;
-  periodSum = 0;
-  lastErrorSign = 0;
-  peakError = 0;
-  troughError = 0; // Reset trough error as well
-
-  current_state = STATE_TUNING;
-  isAutoTuning = true; // Use this flag if needed elsewhere
-
-  debugLog(LOG_PID, "Tuning started. Initial Kp=" + String(Kp) + ", Ki=0, Kd=0");
-}
-
-void processAutoTuning() {
-  unsigned long now = millis();
-
-  // 1. Check for Timeout
-  if (now - tuningStartTime > TUNING_TIMEOUT) {
-    debugLog(LOG_ERROR, "Auto-Tuning TIMEOUT!");
-    // Restore original values
-    Kp = originalKp;
-    Ki = originalKi;
-    Kd = originalKd;
-    setMotorSpeeds(0, 0); // Stop robot
-    current_state = STATE_LINE_FOLLOWING;
-    isAutoTuning = false;
-    notifyTuningValues(); // Notify restored values
-    return;
-  }
-
-  // 2. Calculate Error & Apply P-Control
-  float error = computeError();
-  // Use computePID which now uses global Kp, Ki=0, Kd=0
-  // Note: computePID also updates currentP, currentI, currentD for logging
-  float correction = computePID(error);
-  // Use standard applyMotorSpeed, it will use cornering_speed as base during tuning
-  applyMotorSpeed(error, correction);
-
-  // 3. Oscillation Detection Logic
-  int currentSign = (error > 0) ? 1 : ((error < 0) ? -1 : 0);
-
-  // Update peak/trough within the current half-cycle
-  if (currentSign != 0) { // Ignore if error is exactly zero for peak/trough
-      peakError = max(peakError, error);
-      troughError = min(troughError, error);
-  }
-
-
-  // Detect zero crossing (sign change)
-  if (lastErrorSign != 0 && currentSign != 0 && currentSign != lastErrorSign) {
-    unsigned long crossingTime = now;
-    zeroCrossings++;
-
-    if (zeroCrossings == 1) {
-        firstCrossingTime = crossingTime; // Record time of the very first crossing
-        debugLog(LOG_PID, "Tuning: First zero crossing detected.");
-    } else {
-        // Calculate time since *last* crossing for period estimation
-        unsigned long timeSinceLastCrossing = crossingTime - lastCrossingTime;
-        // Add the duration of this half-period to the sum (we average later)
-        periodSum += timeSinceLastCrossing;
-        debugLog(LOG_PID, "Tuning: Crossing " + String(zeroCrossings) + ", Half-Period(ms): " + String(timeSinceLastCrossing));
-    }
-
-    lastCrossingTime = crossingTime;
-    lastErrorSign = currentSign;
-
-    // Reset peak/trough for the next half-cycle measurement *after* checking stability
-    // peakError = 0; // Resetting here might miss the true peak if crossing happens right after
-    // troughError = 0; // Keep peak/trough over the whole Kp increment interval for stability check? Let's reset per crossing for now.
-    peakError = (currentSign > 0) ? error : 0; // Start new peak/trough from current error after crossing
-    troughError = (currentSign < 0) ? error : 0;
-
-
-    // 4. Check for Stable Oscillation & Calculate PID
-    if (zeroCrossings >= REQUIRED_CROSSINGS) {
-      // Calculate average period (Tu) based on time between first and last crossing
-      // We have (zeroCrossings - 1) measured half-periods.
-      // Number of full cycles = (zeroCrossings - 1) / 2
-      float numFullCycles = (float)(zeroCrossings - 1) / 2.0;
-      if (numFullCycles >= 1) { // Need at least one full cycle measurement
-          Tu = (float)(crossingTime - firstCrossingTime) / numFullCycles; // Average period in ms
-
-          debugLog(LOG_PID, "Tuning: Potential Oscillation Found. Crossings=" + String(zeroCrossings) +
-                            ", Total Time(ms)=" + String(crossingTime - firstCrossingTime) +
-                            ", Cycles=" + String(numFullCycles, 2) +
-                            ", Avg Period Tu(ms)=" + String(Tu, 2));
-
-          // Basic stability check: Period reasonable? Amplitude significant?
-          // Add more checks if needed (e.g., consistency of last few periods)
-          float amplitude = peakError - troughError; // Use peak/trough from the *last full cycle*? Needs more complex tracking. Using overall peak/trough for now.
-          debugLog(LOG_PID, "Tuning: Amplitude=" + String(amplitude, 2) + " (Peak: " + String(peakError, 2) + ", Trough: " + String(troughError, 2) + ")");
-
-          // Define thresholds for "stable" oscillation (adjust these based on testing)
-          const float MIN_AMPLITUDE = 0.5; // Minimum peak-to-trough error difference
-          const float MIN_PERIOD_MS = 50;  // Minimum realistic oscillation period
-          const float MAX_PERIOD_MS = 1000; // Maximum realistic oscillation period
-
-          if (Tu > MIN_PERIOD_MS && Tu < MAX_PERIOD_MS && amplitude > MIN_AMPLITUDE) {
-            Ku = Kp; // Found the ultimate gain!
-            debugLog(LOG_PID, "Auto-Tuning SUCCESS!");
-            debugLog(LOG_PID, "Ku = " + String(Ku, 4));
-            debugLog(LOG_PID, "Tu (ms) = " + String(Tu, 4));
-
-            // Apply Ziegler-Nichols Classic PID formulas
-            float Tu_sec = Tu / 1000.0; // Convert period to seconds for formula
-            Kp = 0.6 * Ku;
-            Ki = (Tu_sec > 0.001) ? (1.2 * Ku / Tu_sec) : 0; // Avoid division by zero/tiny Tu
-            Kd = 0.075 * Ku * Tu_sec;
-
-            debugLog(LOG_PID, "Calculated New PID: Kp=" + String(Kp, 4) + ", Ki=" + String(Ki, 4) + ", Kd=" + String(Kd, 4));
-
-            setMotorSpeeds(0, 0); // Stop robot
-            current_state = STATE_LINE_FOLLOWING;
-            isAutoTuning = false;
-            notifyTuningValues(); // Send newly calculated values
-            return; // Exit tuning process
-          } else {
-             debugLog(LOG_PID, "Tuning: Oscillation detected but not stable/significant enough yet.");
-             // Reset crossing count to wait for more stable cycles at this Kp? Or just continue increasing Kp?
-             // Let's continue increasing Kp for now. If Kp gets too high, timeout will trigger.
-             // Resetting counters here might prevent finding Ku if oscillation starts right at the end of an interval.
-          }
-      }
-    } // End stability check
-  } // End zero crossing detected
-
-
-  // 5. Increase Kp if needed and oscillation not yet stable
-  if (now - lastKpIncreaseTime > KP_INCREMENT_INTERVAL && Ku == 0) { // Only increase if Ku not found yet
-    Kp += KP_INCREMENT;
-    lastKpIncreaseTime = now;
-    // Reset detection helpers as dynamics change with new Kp
-    zeroCrossings = 0;
-    lastCrossingTime = 0;
-    firstCrossingTime = 0;
-    periodSum = 0;
-    lastErrorSign = 0; // Reset sign to allow immediate crossing detection
-    peakError = 0;
-    troughError = 0;
-    integral = 0; // Keep integral zero during tuning
-    debugLog(LOG_PID, "Tuning: Increasing Kp to " + String(Kp, 4));
-  }
 }
