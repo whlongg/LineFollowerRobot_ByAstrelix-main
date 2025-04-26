@@ -6,7 +6,7 @@
 #include <BLE2902.h>
 
 // --- CONFIGURABLE CONSTANTS ---
-#define DEBUG 1
+#define DEBUG 0
 
 #define LOG_INFO 0
 #define LOG_ERROR 1
@@ -14,25 +14,30 @@
 #define LOG_CALIB 3
 
 #define RGB_CHECKING 0                  // 1: kiểm tra màu sắc
-#define ENABLE_BYPASS_INTERSECTION 0    // Đặt 0 nếu tắt bypass
+#define ENABLE_BYPASS_INTERSECTION 1    // Đặt 0 nếu tắt bypass
 #define ENABLE_HIGH_SPEED_ON_STRAIGHT 1 // 0: Không kích hoạt HIGH_SPEED
 #define THREADSOLD_BLACK 300
 
 const float SCALE_RIGHT_MOTOR = 1.002;
-const float Kp_default = 3.66; // 2.91
-const float Ki_default = 0.02;
-const float Kd_default = 39; // 10 is ok
+const float Kp_default = 3.66;
+const float Ki_default = 0;
+const float Kd_default = 39;
 const float INTEGRAL_MAX = 70.0f;
 
 // --- Tunable Parameters (Defaults) ---
-int max_straight_speed = 245;             // Max speed on straights (leave headroom)
-int cornering_speed = 212;                // Base speed for corners or large corrections
+int max_straight_speed = 250;             // Max speed on straights (leave headroom)
+int cornering_speed = 210;                // Base speed for corners or large corrections
 float max_error_for_high_speed = 2.5;     // Error must be BELOW this to use max_straight_speed. Lower value = stricter condition for high speed.
-float min_error_for_low_speed = 3.5;      // Error must be ABOVE this to force cornering_speed. Higher value = more tolerant before slowing down.
-int sharp_turn_speed_reduction = 30;      // Amount to reduce speed further during detected sharp turns.
-int correction_scale = 60;                // Scales PID output to motor speed difference (Tune: 40-80)
-unsigned long bypass_turn_duration = 520; // ms - Duration for the bypass turn
+float min_error_for_low_speed = 3.0;      // Error must be ABOVE this to force cornering_speed. Higher value = more tolerant before slowing down.
+int sharp_turn_speed_reduction = 60;      // Amount to reduce speed further during detected sharp turns.
+int correction_scale = 40;                // Scales PID output to motor speed difference (Tune: 40-80)
+unsigned long bypass_turn_duration = 230; // ms - Duration for the bypass turn
 int threadshold_black = 300;              // IR threshold to consider 'black' for intersection detection
+
+// --- TIMING ---
+unsigned long lastLoop = 0;
+const unsigned long LOOP_INTERVAL = 2; // loop timing ms
+const unsigned long BLE_LOG_INTERVAL_MS = 5; //BLE Log timing ms
 
 // --- Fixed Constants ---
 const int PWM_FREQ = 20000;
@@ -40,6 +45,7 @@ const int PWM_RES = 8;
 const int MAX_PWM = 255;
 const float IR_WEIGHT = 0.22;
 const float RGB_FILTER_ALPHA = 0.3f;
+const float D_FILTER_ALPHA = 0.5; // <<----- THÊM MỚI (Hệ số lọc cho Derivative, thử nghiệm 0.3 - 0.7)
 
 // --- BLE Definitions ---
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -88,17 +94,18 @@ enum RobotState
 // --- GLOBALS ---
 float Kp = Kp_default, Ki = Ki_default, Kd = Kd_default;
 float last_error = 0, integral = 0;
+float filtered_derivative = 0; //gia tri vi phan da duoc loc
 uint16_t c_filtered = 0;
 RobotState current_state = STATE_LINE_FOLLOWING;
 unsigned long bypass_start_time = 0;
-// const unsigned long BYPASS_TURN_DURATION = 520; // Now a tunable variable above
+
+// --- BLE Logging Globals ---
+float currentP = 0, currentI = 0, currentD = 0;
+int currentLeftSpeed = 0, currentRightSpeed = 0;
+unsigned long lastBleLogTime = 0; // Timer for throttling BLE logs
 
 int ir_raw[SENSOR_COUNT] = {0, 0, 0, 0};
 int ir_norm[SENSOR_COUNT] = {0, 0, 0, 0}; // 0-1000
-
-// --- LOOP TIMING ---
-unsigned long lastLoop = 0;
-const unsigned long LOOP_INTERVAL = 1; // ms
 
 // --- FUNCTION DECLARATIONS ---
 void startBypassManeuver(); // Renamed from bypassIntersection
@@ -116,7 +123,6 @@ void notifyTuningValues(); // Renamed: Function to send ALL tuning values over B
 void debugLog(uint8_t level, String msg);
 bool detectNonWhiteLine();
 bool isAllIRBlack();
-// void bypassIntersection(); // Replaced by startBypassManeuver and checkBypassCompletion
 
 // --- SETUP ---
 void setup()
@@ -129,7 +135,7 @@ void setup()
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   digitalWrite(W_LED_ON, 1);
   digitalWrite(IR_LED_ON, 1);
-
+  
   if (!rgbSensor.begin())
   {
     debugLog(LOG_ERROR, "RGB sensor not found!");
@@ -153,71 +159,81 @@ void setup()
 void loop()
 {
   unsigned long t0 = micros();
-
   unsigned long now = millis();
-  if (now - lastLoop >= LOOP_INTERVAL)
-  {
-    lastLoop = now;
 
-    // --- State Machine Logic ---
-    if (current_state == STATE_BYPASSING)
+  // Enforce loop timing
+  if (now - lastLoop < LOOP_INTERVAL) {
+    return;
+  }
+  lastLoop = now;
+
+  // Read sensors
+  readIRSensors();
+
+  // State machine
+  switch (current_state) {
+    case STATE_LINE_FOLLOWING:
     {
-      checkBypassCompletion();
-      // Skip normal line following while bypassing
-    }
-    else
-    { // STATE_LINE_FOLLOWING
+      // Normal PID line following
       float error = computeError();
       float correction = computePID(error);
-
-#if ENABLE_BYPASS_INTERSECTION
-      if (isAllIRBlack())
-      {
-        debugLog(LOG_INFO, "Intersection detected, starting bypass.");
-        startBypassManeuver();
-        // Don't apply motor speed based on PID this cycle, bypass maneuver takes over
-      }
-      else
-      {
-        // Only apply PID motor speed if not starting a bypass
-        applyMotorSpeed(error, correction);
-      }
-#else
-      // If bypass is disabled, always apply PID motor speed
       applyMotorSpeed(error, correction);
-#endif // ENABLE_BYPASS_INTERSECTION
 
-#if RGB_CHECKING // RGB_CHECKING
-      if (detectNonWhiteLine())
-      {
-        debugLog(LOG_INFO, "Non-white line detected!");
-        // stop(); return;
+      // Check for intersection if enabled
+      if (ENABLE_BYPASS_INTERSECTION && isAllIRBlack()) {
+        startBypassManeuver();
       }
-#endif
-      // applyMotorSpeed(error, correction); // Moved inside state logic
-      // tunePID(); // Replaced by BLE callback
-    } // End State Machine Logic
+      break;
+    }
 
-    // Handle BLE connection status changes (can happen in any state)
-    if (deviceConnected && !oldDeviceConnected)
-    {
-      oldDeviceConnected = deviceConnected;
-      debugLog(LOG_INFO, "BLE Device Connected");
-    }
-    if (!deviceConnected && oldDeviceConnected)
-    {
-      oldDeviceConnected = deviceConnected;
-      debugLog(LOG_INFO, "BLE Device Disconnected");
-      // Optional: Start advertising again if needed, depending on library behavior
-      // BLEDevice::startAdvertising();
-    }
+    case STATE_BYPASSING:
+      checkBypassCompletion();
+      break;
+  }
+
+  // BLE connection management
+  if (deviceConnected && !oldDeviceConnected) {
+    // Connected
+    oldDeviceConnected = deviceConnected;
+    debugLog(LOG_INFO, "BLE device connected");
+  }
+  if (!deviceConnected && oldDeviceConnected) {
+    // Disconnected
+    oldDeviceConnected = deviceConnected;
+    pServer->startAdvertising(); // restart advertising
+    debugLog(LOG_INFO, "BLE device disconnected, start advertising");
+  }
+
+  // --- BLE Real-time Data Logging (CSV Format) - Throttled ---
+  if (deviceConnected && pCharacteristicTX != NULL && (now - lastBleLogTime >= BLE_LOG_INTERVAL_MS))
+  {
+    lastBleLogTime = now; // Update the last log time
+
+    // New Format: IR_norm(ir0,ir1,ir2,ir3),Pid(kp,ki,kd),Error,Speed(left,right)\n
+    String logData = String(millis()) + "," +
+                String(ir_norm[0]) + "," +
+                String(ir_norm[1]) + "," +
+                String(ir_norm[2]) + "," +
+                String(ir_norm[3]) + "," +
+                String(currentP, 4) + "," +
+                String(currentI, 4) + "," +
+                String(currentD, 4) + "," +
+                String(last_error, 4) + "," +
+                String(currentLeftSpeed) + "," +
+                String(currentRightSpeed) + "\n";
+
+    // Send data via BLE Notification
+    // Note: Ensure MTU is large enough or handle potential fragmentation if needed.
+    // For typical terminal apps, sending line by line should be okay.
+    pCharacteristicTX->setValue(logData.c_str());
+    pCharacteristicTX->notify();
+  }
 
 #if DEBUG
-    unsigned long t1 = micros();
-    Serial.print("looptime_us=");
-    Serial.println(t1 - t0);
+  unsigned long t1 = micros();
+  Serial.print("looptime_us=");
+  Serial.println(t1 - t0);
 #endif
-  }
 }
 
 // --- Unified Debug Logging ---
@@ -246,14 +262,8 @@ void debugLog(uint8_t level, String msg)
   String fullMsg = prefix + msg;
   Serial.println(fullMsg);
 
-  // Gửi log qua BLE nếu đã kết nối
-  if (deviceConnected && pCharacteristicTX != NULL)
-  {
-    // BLE MTU mặc định ~20 bytes, nên cắt ngắn nếu cần
-    String bleMsg = fullMsg.substring(0, 90); // Đảm bảo không quá dài
-    pCharacteristicTX->setValue(bleMsg.c_str());
-    pCharacteristicTX->notify();
-  }
+  // --- REMOVED BLE LOGGING FROM HERE ---
+  // BLE logging will now be done separately in the main loop with CSV data
 #endif
 }
 
@@ -333,12 +343,8 @@ void readIRSensors()
 // --- Error Calculation (Weighted Center, IR only) ---
 float computeError()
 {
-  // 1. Read and normalize IR sensors
   readIRSensors();
-
-  // 2. Weighted error calculation (centered at 0)
-  // Sensor positions: 3, 1, -1, -3 (left to right)
-  int weights[SENSOR_COUNT] = {3, 1, -1, -3};
+  int weights[SENSOR_COUNT] = {2, 1, -1, -2};
   int sum = 0, total = 0;
   for (int i = 0; i < SENSOR_COUNT; i++)
   {
@@ -377,22 +383,26 @@ float computePID(float error)
     // Giới hạn integral để tránh windup
     integral = constrain(integral, -INTEGRAL_MAX, INTEGRAL_MAX);
   }
-
-  // Đặt lại integral nếu error đổi dấu (qua line) hoặc error rất lớn (mất line)
   if ((error * last_error < 0) || (abs(error) > 2.5))
-  {
     integral = 0;
-  }
 
-  float derivative = error - last_error;
-  float output = Kp * error + Ki * integral + Kd * derivative;
+  float raw_derivative = error - last_error;
+  filtered_derivative = D_FILTER_ALPHA * raw_derivative + (1.0 - D_FILTER_ALPHA) * filtered_derivative; //filter D term
+
+  // Store components for logging
+  currentP = Kp * error;
+  currentI = Ki * integral;
+  currentD = Kd * filtered_derivative;
+
+  float output = currentP + currentI + currentD;
   last_error = error;
+
 #if DEBUG
-  Serial.print(Kp * error, 4);
+  Serial.print(currentP, 4);
   Serial.print(",");
-  Serial.print(Ki * integral, 4);
+  Serial.print(currentI, 4);
   Serial.print(",");
-  Serial.print(Kd * derivative, 4);
+  Serial.print(currentD, 4);
   Serial.print(",");
   Serial.print(output, 4);
   Serial.print(",");
@@ -411,47 +421,41 @@ void applyMotorSpeed(float error, float correction)
 
 #if ENABLE_HIGH_SPEED_ON_STRAIGHT
   if (sharp_turn)
-  {
-    current_base_speed = cornering_speed - sharp_turn_speed_reduction; // Use variable names
-  }
-  else if (abs_error <= max_error_for_high_speed) // Use variable name
-  {
-    current_base_speed = max_straight_speed; // Use variable name
-  }
-  else if (abs_error >= min_error_for_low_speed) // Use variable name
-  {
-    current_base_speed = cornering_speed; // Use variable name
-  }
+    current_base_speed = cornering_speed - sharp_turn_speed_reduction;   
+  else if (abs_error <= max_error_for_high_speed)   
+    current_base_speed = max_straight_speed;   
+  else if (abs_error >= min_error_for_low_speed)   
+    current_base_speed = cornering_speed;   
   else
   {
     current_base_speed = map(abs_error * 100,
-                             max_error_for_high_speed * 100,                                 // Use variable name
-                             min_error_for_low_speed * 100,                                  // Use variable name
-                             max_straight_speed,                                             // Use variable name
-                             cornering_speed);                                               // Use variable name
-    current_base_speed = constrain(current_base_speed, cornering_speed, max_straight_speed); // Use variable names
+                             max_error_for_high_speed * 100,                                   
+                             min_error_for_low_speed * 100,                                    
+                             max_straight_speed,                                               
+                             cornering_speed);                                                 
+    current_base_speed = constrain(current_base_speed, cornering_speed, max_straight_speed);   
   }
 #else
-  current_base_speed = cornering_speed; // Use variable name
+  current_base_speed = cornering_speed;
 #endif
-
-  // Giới hạn correction để tránh oversteer
   correction = constrain(correction, -2.5, 2.5);
 
-  int left_speed = current_base_speed + correction * correction_scale;  // Use variable name
-  int right_speed = current_base_speed - correction * correction_scale; // Use variable name
-  left_speed = constrain(left_speed, 0, MAX_PWM);
-  right_speed = constrain(right_speed, 0, MAX_PWM);
+  currentLeftSpeed = current_base_speed + correction * correction_scale;
+  currentRightSpeed = current_base_speed - correction * correction_scale;
+  currentLeftSpeed = constrain(currentLeftSpeed, 0, MAX_PWM);
+  currentRightSpeed = constrain(currentRightSpeed, 0, MAX_PWM);
 
-  setMotorSpeeds(left_speed, right_speed);
+  setMotorSpeeds(currentLeftSpeed, currentRightSpeed);
 
 #if DEBUG
-  Serial.print(left_speed);
+  Serial.print(currentLeftSpeed);
   Serial.print(",");
-  Serial.println(right_speed);
+  Serial.println(currentRightSpeed);
 #endif
 }
 
+
+//=============================BLE FUNCTION================================
 // --- BLE Characteristic Callbacks ---
 class MyServerCallbacks : public BLEServerCallbacks
 {
@@ -470,48 +474,32 @@ class MyCallbacks : public BLECharacteristicCallbacks
 {
   void onWrite(BLECharacteristic *pCharacteristic)
   {
-    String rxValue = pCharacteristic->getValue(); // Changed type to Arduino String
-    if (rxValue.length() > 0)
-    {
-      handleBLECommands(rxValue); // Pass Arduino String
-    }
+    String rxValue = pCharacteristic->getValue();
+    if (rxValue.length() > 0)  handleBLECommands(rxValue);
   }
 };
 
 // --- Setup BLE ---
 void setupBLE()
 {
-  // Create the BLE Device
-  BLEDevice::init("LineFollowerPID"); // Give your BLE device a name
-
-  // Create the BLE Server
+  BLEDevice::init("LineFollowerPID");
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
-
-  // Create the BLE Service
   BLEService *pService = pServer->createService(SERVICE_UUID);
-
-  // Create a BLE Characteristic for receiving commands (RX)
   pCharacteristicRX = pService->createCharacteristic(
       CHARACTERISTIC_UUID_RX,
       BLECharacteristic::PROPERTY_WRITE);
   pCharacteristicRX->setCallbacks(new MyCallbacks());
-
-  // Create a BLE Characteristic for sending PID values (TX)
   pCharacteristicTX = pService->createCharacteristic(
       CHARACTERISTIC_UUID_TX,
       BLECharacteristic::PROPERTY_READ |
           BLECharacteristic::PROPERTY_NOTIFY);
-  pCharacteristicTX->addDescriptor(new BLE2902()); // Needed for notifications
-
-  // Start the service
+  pCharacteristicTX->addDescriptor(new BLE2902());
   pService->start();
-
-  // Start advertising
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06); // functions that help with iPhone connections issue
+  pAdvertising->setMinPreferred(0x06);
   pAdvertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
   debugLog(LOG_INFO, "Waiting a client connection to notify...");
@@ -520,11 +508,9 @@ void setupBLE()
 // --- Handle Commands Received via BLE ---
 void handleBLECommands(String cmd) // Changed parameter type to Arduino String
 {
-  // String cmd = String(value.c_str()); // No longer needed, already Arduino String
-  cmd.trim(); // Remove potential whitespace/newlines
+  cmd.trim();
   debugLog(LOG_INFO, "BLE RX: " + cmd);
-
-  bool valueChanged = false; // Flag to check if any value was updated
+  bool valueChanged = false;
   if (cmd.startsWith("kp="))
   {
     Kp = cmd.substring(3).toFloat();
@@ -540,54 +526,50 @@ void handleBLECommands(String cmd) // Changed parameter type to Arduino String
     Kd = cmd.substring(3).toFloat();
     valueChanged = true;
   }
-  else if (cmd.startsWith("ms=")) // MAX_STRAIGHT_SPEED
+  else if (cmd.startsWith("ms=")) 
   {
     max_straight_speed = cmd.substring(3).toInt();
     valueChanged = true;
   }
-  else if (cmd.startsWith("cs=")) // CORNERING_SPEED
+  else if (cmd.startsWith("cs=")) 
   {
     cornering_speed = cmd.substring(3).toInt();
     valueChanged = true;
   }
-  else if (cmd.startsWith("maxerr=")) // MAX_ERROR_FOR_HIGH_SPEED
+  else if (cmd.startsWith("maxerr=")) 
   {
     max_error_for_high_speed = cmd.substring(7).toFloat();
     valueChanged = true;
   }
-  else if (cmd.startsWith("minerr=")) // MIN_ERROR_FOR_LOW_SPEED
+  else if (cmd.startsWith("minerr=")) 
   {
     min_error_for_low_speed = cmd.substring(7).toFloat();
     valueChanged = true;
   }
-  else if (cmd.startsWith("sharpred=")) // SHARP_TURN_SPEED_REDUCTION
+  else if (cmd.startsWith("sharpred=")) 
   {
     sharp_turn_speed_reduction = cmd.substring(9).toInt();
     valueChanged = true;
   }
-  else if (cmd.startsWith("corrscale=")) // CORRECTION_SCALE
+  else if (cmd.startsWith("corrscale=")) 
   {
     correction_scale = cmd.substring(10).toInt();
     valueChanged = true;
   }
-  else if (cmd.startsWith("bypdur=")) // BYPASS_TURN_DURATION
+  else if (cmd.startsWith("bypdur=")) 
   {
-    bypass_turn_duration = cmd.substring(7).toInt(); // Use toInt() for unsigned long
+    bypass_turn_duration = cmd.substring(7).toInt(); 
     valueChanged = true;
   }
-  else if (cmd.startsWith("threshblk=")) // THREADSOLD_BLACK
+  else if (cmd.startsWith("threshblk=")) 
   {
     threadshold_black = cmd.substring(10).toInt();
     valueChanged = true;
   }
-  else if (cmd.equalsIgnoreCase("getpid")) // Keep this for compatibility or specific PID request
-  {
-    valueChanged = true; // Trigger notification without changing values
-  }
-  else if (cmd.equalsIgnoreCase("getall")) // New command to get all values
-  {
-    valueChanged = true; // Trigger notification without changing values
-  }
+  else if (cmd.equalsIgnoreCase("getpid"))
+    valueChanged = true;
+  else if (cmd.equalsIgnoreCase("getall")) 
+    valueChanged = true; 
 
   if (valueChanged)
   {
@@ -598,7 +580,7 @@ void handleBLECommands(String cmd) // Changed parameter type to Arduino String
                     " SharpRed=" + String(sharp_turn_speed_reduction) + " CorrScl=" + String(correction_scale) +
                     " BypDur=" + String(bypass_turn_duration) + " ThreshBlk=" + String(threadshold_black);
     debugLog(LOG_PID, logMsg);
-    notifyTuningValues(); // Send updated values back via BLE
+    notifyTuningValues();
   }
 }
 
@@ -641,6 +623,8 @@ void notifyTuningValues()
     debugLog(LOG_PID, "Notified All Values: " + allValues.substring(0, 100) + (allValues.length() > 100 ? "..." : "")); // Log truncated if too long
   }
 }
+//=========================================================================
+
 
 // --- Motor Setup ---
 void setupMotors()
@@ -651,14 +635,33 @@ void setupMotors()
   ledcAttachChannel(PWM_PIN_R_B, PWM_FREQ, PWM_RES, right_motor_channel_b);
 }
 
-// --- Motor Speed Control ---
-void setMotorSpeeds(int left, int right)
+// --- Motor Speed Control (backward support)---
+void setMotorSpeeds(int left, int right) 
 {
-  right = right * SCALE_RIGHT_MOTOR; // Apply scaling factor to right motor
-  ledcWriteChannel(left_motor_channel_a, left);
-  ledcWriteChannel(left_motor_channel_b, 0);
-  ledcWriteChannel(right_motor_channel_a, right);
-  ledcWriteChannel(right_motor_channel_b, 0);
+  if (right > 0)  right = right * SCALE_RIGHT_MOTOR; 
+  // --- Điều khiển Motor Trái ---
+  if (left > 0) {
+    ledcWriteChannel(left_motor_channel_a, left);
+    ledcWriteChannel(left_motor_channel_b, 0);
+  } else if (left < 0) {
+    ledcWriteChannel(left_motor_channel_a, 0);
+    ledcWriteChannel(left_motor_channel_b, abs(left));
+  } else {
+    ledcWriteChannel(left_motor_channel_a, 0);
+    ledcWriteChannel(left_motor_channel_b, 0);
+  }
+
+  // --- Điều khiển Motor Phải ---
+  if (right > 0) {
+    ledcWriteChannel(right_motor_channel_a, right);
+    ledcWriteChannel(right_motor_channel_b, 0);
+  } else if (right < 0) {
+    ledcWriteChannel(right_motor_channel_a, 0);
+    ledcWriteChannel(right_motor_channel_b, abs(right));
+  } else {
+    ledcWriteChannel(right_motor_channel_a, 0);
+    ledcWriteChannel(right_motor_channel_b, 0);
+  }
 }
 
 // --- Color Detection (use in loop if needed) ---
@@ -679,25 +682,25 @@ bool isAllIRBlack()
 {
   // Check sensors first (ensure readIRSensors was called recently)
   return (ir_norm[0] < threadshold_black && ir_norm[1] < threadshold_black && ir_norm[2] < threadshold_black && ir_norm[3] < threadshold_black);
-  // for (int i = 0; i < SENSOR_COUNT; i++)
-  // {
-  //   if (ir_norm[i] > 200)
-  //     return false; // 200 là ngưỡng, có thể chỉnh
-  // }
-  // return true;
+
 }
 
 // --- Start Intersection Bypass Maneuver (Non-Blocking) ---
 void startBypassManeuver()
 {
+  // 1. Phanh gấp bằng cách chạy lùi RẤT NGẮN
+  setMotorSpeeds(-255, -255);
+  delay(50);
+
+  // 2. Bắt đầu rẽ phải gắt
+  setMotorSpeeds(MAX_PWM, 0); 
+  
+  // 3. Thiết lập trạng thái bypass
   current_state = STATE_BYPASSING;
-  bypass_start_time = millis();
-  // Dừng trái, phải chạy tốc độ cao
-  setMotorSpeeds(MAX_PWM, 0);
-  debugLog(LOG_INFO, "Bypass state entered. Turning right.");
-  // Reset PID terms to avoid jump when resuming
+  bypass_start_time = millis(); 
   integral = 0;
   last_error = 0;
+  debugLog(LOG_INFO, "Bypass: Braking then Turning right.");
 }
 
 // --- Check if Bypass Maneuver is Complete ---

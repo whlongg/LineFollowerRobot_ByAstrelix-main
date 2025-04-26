@@ -15,29 +15,34 @@
 
 #define RGB_CHECKING 0                  // 1: kiểm tra màu sắc
 #define ENABLE_BYPASS_INTERSECTION 0    // Đặt 0 nếu tắt bypass
-#define ENABLE_HIGH_SPEED_ON_STRAIGHT 0 // 0: Không kích hoạt HIGH_SPEED
+#define ENABLE_HIGH_SPEED_ON_STRAIGHT 1 // 0: Không kích hoạt HIGH_SPEED
 #define THREADSOLD_BLACK 300
 
 const float SCALE_RIGHT_MOTOR = 1.002;
-const float Kp_default = 1.8; // 2.91
-const float Ki_default = 0.001;
-const float Kd_default = 11;
+const float Kp_default = 3.66;
+const float Ki_default = 0;
+const float Kd_default = 39;
 const float INTEGRAL_MAX = 70.0f;
 
 // --- Tunable Parameters (Defaults) ---
-int max_straight_speed = 240;             // Max speed on straights (leave headroom)
-int cornering_speed = 212;                // Base speed for corners or large corrections
+int max_straight_speed = 250;             // Max speed on straights (leave headroom)
+int cornering_speed = 210;                // Base speed for corners or large corrections
 float max_error_for_high_speed = 2.5;     // Error must be BELOW this to use max_straight_speed. Lower value = stricter condition for high speed.
-float min_error_for_low_speed = 3.5;      // Error must be ABOVE this to force cornering_speed. Higher value = more tolerant before slowing down.
-int sharp_turn_speed_reduction = 30;      // Amount to reduce speed further during detected sharp turns.
+float min_error_for_low_speed = 3.0;      // Error must be ABOVE this to force cornering_speed. Higher value = more tolerant before slowing down.
+int sharp_turn_speed_reduction = 60;      // Amount to reduce speed further during detected sharp turns.
 int correction_scale = 40;                // Scales PID output to motor speed difference (Tune: 40-80)
-unsigned long bypass_turn_duration = 520; // ms - Duration for the bypass turn
+
+// Động - được tính trong quá trình hiệu chuẩn
 int threadshold_black = 300;              // IR threshold to consider 'black' for intersection detection
+int threshold_reacquire = 300;            // IR threshold for inner sensors to detect line during turn
+int threshold_reacquire_outer = 500;      // IR threshold for outer sensors to detect white during turn
+
+unsigned long max_turn_duration = 500;    // Maximum time for a turn in milliseconds
 
 // --- TIMING ---
 unsigned long lastLoop = 0;
-const unsigned long LOOP_INTERVAL = 1; // loop timing ms
-const unsigned long BLE_LOG_INTERVAL_MS = 10; //BLE Log timing ms
+const unsigned long LOOP_INTERVAL = 2; // loop timing ms
+const unsigned long BLE_LOG_INTERVAL_MS = 5; //BLE Log timing ms
 
 // --- Fixed Constants ---
 const int PWM_FREQ = 20000;
@@ -45,6 +50,7 @@ const int PWM_RES = 8;
 const int MAX_PWM = 255;
 const float IR_WEIGHT = 0.22;
 const float RGB_FILTER_ALPHA = 0.3f;
+const float D_FILTER_ALPHA = 0.5; // <<----- THÊM MỚI (Hệ số lọc cho Derivative, thử nghiệm 0.3 - 0.7)
 
 // --- BLE Definitions ---
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -87,15 +93,27 @@ uint16_t ir_max[SENSOR_COUNT] = {0, 0, 0, 0};
 enum RobotState
 {
   STATE_LINE_FOLLOWING,
-  STATE_BYPASSING
+  STATE_MANUAL_RIGHT_TURN,
+  STATE_BRAKE_BEFORE_TURN,
+  STATE_STABILIZE_AFTER_TURN,
+  STATE_SPEED_UP_AFTER_STABILIZE  // New state for gradual speed increase
 };
 
 // --- GLOBALS ---
 float Kp = Kp_default, Ki = Ki_default, Kd = Kd_default;
 float last_error = 0, integral = 0;
+float filtered_derivative = 0; //gia tri vi phan da duoc loc
 uint16_t c_filtered = 0;
 RobotState current_state = STATE_LINE_FOLLOWING;
-unsigned long bypass_start_time = 0;
+unsigned long turn_start_time = 0;        // Time when turn started
+unsigned long brake_start_time = 0;       // Time when braking started
+unsigned long stabilize_start_time = 0;   // Time when stabilization started
+unsigned long speed_up_start_time = 0;    // Time when speed up phase started
+
+// Các thông số thời gian cho máy trạng thái
+const unsigned long BRAKE_DURATION = 28;          // ms - Thời gian phanh trước khi rẽ
+const unsigned long STABILIZE_DURATION = 20;      // ms - Thời gian ổn định sau khi rẽ
+const unsigned long SPEED_UP_DURATION = 200;      // ms - Thời gian tăng tốc độ trở lại
 
 // --- BLE Logging Globals ---
 float currentP = 0, currentI = 0, currentD = 0;
@@ -106,8 +124,6 @@ int ir_raw[SENSOR_COUNT] = {0, 0, 0, 0};
 int ir_norm[SENSOR_COUNT] = {0, 0, 0, 0}; // 0-1000
 
 // --- FUNCTION DECLARATIONS ---
-void startBypassManeuver(); // Renamed from bypassIntersection
-void checkBypassCompletion();
 void setupMotors();
 void setMotorSpeeds(int left, int right);
 void readIRSensors();
@@ -115,12 +131,13 @@ void calibrateSensors();
 float computeError();
 float computePID(float error);
 void applyMotorSpeed(float error, float correction);
-void handleBLECommands(String value); // Changed parameter type to Arduino String
+void handleBLECommands(String value);
 void setupBLE();
-void notifyTuningValues(); // Renamed: Function to send ALL tuning values over BLE
+void notifyTuningValues();
 void debugLog(uint8_t level, String msg);
 bool detectNonWhiteLine();
 bool isAllIRBlack();
+bool hasReacquiredLineAfterRightTurn();
 
 // --- SETUP ---
 void setup()
@@ -133,7 +150,7 @@ void setup()
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   digitalWrite(W_LED_ON, 1);
   digitalWrite(IR_LED_ON, 1);
-
+  
   if (!rgbSensor.begin())
   {
     debugLog(LOG_ERROR, "RGB sensor not found!");
@@ -179,14 +196,92 @@ void loop()
 
       // Check for intersection if enabled
       if (ENABLE_BYPASS_INTERSECTION && isAllIRBlack()) {
-        startBypassManeuver();
+        // Bắt đầu quá trình phanh trước khi rẽ
+        current_state = STATE_BRAKE_BEFORE_TURN;
+        brake_start_time = now;
+        setMotorSpeeds(-255, -255); // Phanh gấp bằng cách chạy lùi
+        debugLog(LOG_INFO, "Starting braking before turn");
+      }
+      break;
+    }
+    
+    case STATE_BRAKE_BEFORE_TURN:
+    {
+      // Kiểm tra nếu đã phanh đủ thời gian
+      if (now - brake_start_time >= BRAKE_DURATION) {
+        // Chuyển sang trạng thái rẽ phải
+        current_state = STATE_MANUAL_RIGHT_TURN;
+        turn_start_time = now;
+        
+        // Reset các biến PID để tránh đột ngột khi quay lại điều khiển PID
+        integral = 0;
+        last_error = 0;
+        filtered_derivative = 0;
+        
+        // Bắt đầu rẽ phải gắt
+        setMotorSpeeds(MAX_PWM, 0);
+        debugLog(LOG_INFO, "Starting sensor-based right turn maneuver");
       }
       break;
     }
 
-    case STATE_BYPASSING:
-      checkBypassCompletion();
+    case STATE_MANUAL_RIGHT_TURN:
+    {
+      // Tiếp tục rẽ phải gắt
+      setMotorSpeeds(MAX_PWM, 0);
+      
+      // Kiểm tra điều kiện hoàn thành: Đã tái bắt được line HOẶC vượt quá thởi gian tối đa
+      if (hasReacquiredLineAfterRightTurn() || (now - turn_start_time > max_turn_duration)) {
+        // Chuyển sang trạng thái ổn định trước khi quay lại line-following
+        current_state = STATE_STABILIZE_AFTER_TURN;
+        stabilize_start_time = now;
+        
+        // Giảm tốc sau khi rẽ thành công để ổn định
+        int reduced_speed = cornering_speed * 0.7; // Giảm tốc còn 70% tốc độ góc cua
+        setMotorSpeeds(reduced_speed, reduced_speed); // Chạy thẳng với tốc độ chậm hơn
+        
+        if (now - turn_start_time > max_turn_duration) {
+          debugLog(LOG_INFO, "Right turn timeout: Max duration reached.");
+        } else {
+          debugLog(LOG_INFO, "Right turn complete: Line reacquired. Slowing down for stabilization.");
+        }
+      }
       break;
+    }
+    
+    case STATE_STABILIZE_AFTER_TURN:
+    {
+      // Duy trì tốc độ thấp trong thời gian ổn định
+      if (now - stabilize_start_time >= STABILIZE_DURATION) {
+        // Reset PID variables to prevent sudden jumps
+        integral = 0;
+        last_error = 0;
+        filtered_derivative = 0;
+        
+        // Chuyển sang trạng thái tăng tốc
+        current_state = STATE_SPEED_UP_AFTER_STABILIZE;
+        speed_up_start_time = now;
+        debugLog(LOG_INFO, "Stabilization complete. Starting speed up phase.");
+      }
+      break;
+    }
+    
+    case STATE_SPEED_UP_AFTER_STABILIZE:
+    {
+      // Tăng tốc dần dần
+      int time_in_speed_up = now - speed_up_start_time;
+      int target_speed = map(time_in_speed_up, 0, SPEED_UP_DURATION, cornering_speed, max_straight_speed);
+      target_speed = constrain(target_speed, cornering_speed, max_straight_speed);
+      setMotorSpeeds(target_speed, target_speed);
+      
+      // Kiểm tra nếu đã tăng tốc đủ
+      if (time_in_speed_up >= SPEED_UP_DURATION) {
+        // Trở lại line following
+        current_state = STATE_LINE_FOLLOWING;
+        debugLog(LOG_INFO, "Speed up complete. Resuming line following.");
+      }
+      break;
+    }
   }
 
   // BLE connection management
@@ -213,9 +308,9 @@ void loop()
                 String(ir_norm[1]) + "," +
                 String(ir_norm[2]) + "," +
                 String(ir_norm[3]) + "," +
-                String(Kp, 4) + "," +
-                String(Ki, 4) + "," +
-                String(Kd, 4) + "," +
+                String(currentP, 4) + "," +
+                String(currentI, 4) + "," +
+                String(currentD, 4) + "," +
                 String(last_error, 4) + "," +
                 String(currentLeftSpeed) + "," +
                 String(currentRightSpeed) + "\n";
@@ -284,14 +379,13 @@ void calibrateSensors()
     {
       rgbSensor.getRawData(&r, &g, &b, &c);
       c_accum += c;
-      delay(5);
     }
     uint16_t c_avg = c_accum / SENSOR_CALIB_SAMPLES;
     if (i == 0)
       rgb_max = c_avg;
     else
       rgb_min = c_avg;
-    debugLog(LOG_CALIB, String("RGB.C avg=") + c_avg);
+    debugLog(LOG_CALIB, String("C ") + (i == 0 ? "max=" : "min=") + c_avg);
 
     // --- IR Calibration ---
     for (int s = 0; s < SENSOR_COUNT; s++)
@@ -300,7 +394,6 @@ void calibrateSensors()
       for (int j = 0; j < SENSOR_CALIB_SAMPLES; j++)
       {
         ir_accum += analogRead(IR_PINS[s]);
-        delay(2);
       }
       uint16_t ir_avg = ir_accum / SENSOR_CALIB_SAMPLES;
       if (i == 0)
@@ -323,6 +416,40 @@ void calibrateSensors()
     if (ir_max[s] == ir_min[s])
       ir_max[s] = ir_min[s] + 1;
   }
+  
+  // Tính toán các ngưỡng dựa trên kết quả hiệu chuẩn
+  // Thay vì dùng giá trị cố định, tính toán dựa trên khoảng giá trị đo được
+  
+  // Tính ngưỡng phát hiện đường đen cho việc phát hiện giao lộ
+  // Lấy giá trị khoảng 30% giữa giá trị đen và trắng (gần với đen hơn)
+  for (int s = 0; s < SENSOR_COUNT; s++) {
+    int range = ir_max[s] - ir_min[s];
+    int threshold = ir_min[s] + range * 0.3; // 30% từ mức đen
+    
+    // Lấy giá trị trung bình của tất cả các cảm biến
+    if (s == 0) {
+      threadshold_black = threshold;
+    } else {
+      threadshold_black = (threadshold_black + threshold) / 2;
+    }
+  }
+  
+  // Tính ngưỡng tái bắt đường (hơi cao hơn threadshold_black để tránh false positive)
+  threshold_reacquire = threadshold_black + 20;
+  
+  // Ngưỡng phát hiện bề mặt trắng cho cảm biến ngoài, khoảng 70% giữa trắng và đen
+  threshold_reacquire_outer = 0;
+  for (int s = 0; s < SENSOR_COUNT; s++) {
+    int range = ir_max[s] - ir_min[s];
+    int threshold = ir_min[s] + range * 0.7; // 70% từ mức đen (gần với trắng hơn)
+    threshold_reacquire_outer += threshold;
+  }
+  threshold_reacquire_outer = threshold_reacquire_outer / SENSOR_COUNT;
+  
+  debugLog(LOG_CALIB, "Calculated thresholds: Black=" + String(threadshold_black) + 
+                       ", Reacquire=" + String(threshold_reacquire) + 
+                       ", ReacquireOuter=" + String(threshold_reacquire_outer));
+  
   debugLog(LOG_CALIB, "Calibration done.");
 }
 
@@ -345,8 +472,8 @@ float computeError()
   readIRSensors();
 
   // 2. Weighted error calculation (centered at 0)
-  // Sensor positions: 3, 1, -1, -3 (left to right)
-  int weights[SENSOR_COUNT] = {3, 1, -1, -3};
+  // Sensor positions: 2, 1, -1, -2 (left to right)
+  int weights[SENSOR_COUNT] = {2, 1, -1, -2};
   int sum = 0, total = 0;
   for (int i = 0; i < SENSOR_COUNT; i++)
   {
@@ -385,19 +512,18 @@ float computePID(float error)
     // Giới hạn integral để tránh windup
     integral = constrain(integral, -INTEGRAL_MAX, INTEGRAL_MAX);
   }
-
-  // Đặt lại integral nếu error đổi dấu (qua line) hoặc error rất lớn (mất line)
   if ((error * last_error < 0) || (abs(error) > 2.5))
   {
     integral = 0;
   }
 
-  float derivative = error - last_error;
+  float raw_derivative = error - last_error;
+  filtered_derivative = D_FILTER_ALPHA * raw_derivative + (1.0 - D_FILTER_ALPHA) * filtered_derivative; //filter D term
 
   // Store components for logging
   currentP = Kp * error;
   currentI = Ki * integral;
-  currentD = Kd * derivative;
+  currentD = Kd * filtered_derivative;
 
   float output = currentP + currentI + currentD;
   last_error = error;
@@ -585,14 +711,19 @@ void handleBLECommands(String cmd) // Changed parameter type to Arduino String
     correction_scale = cmd.substring(10).toInt();
     valueChanged = true;
   }
-  else if (cmd.startsWith("bypdur=")) // BYPASS_TURN_DURATION
-  {
-    bypass_turn_duration = cmd.substring(7).toInt(); // Use toInt() for unsigned long
-    valueChanged = true;
-  }
   else if (cmd.startsWith("threshblk=")) // THREADSOLD_BLACK
   {
     threadshold_black = cmd.substring(10).toInt();
+    valueChanged = true;
+  }
+  else if (cmd.startsWith("reacq=")) // THRESHOLD_REACQUIRE
+  {
+    threshold_reacquire = cmd.substring(6).toInt();
+    valueChanged = true;
+  }
+  else if (cmd.startsWith("reacqouter=")) // THRESHOLD_REACQUIRE_OUTER
+  {
+    threshold_reacquire_outer = cmd.substring(11).toInt();
     valueChanged = true;
   }
   else if (cmd.equalsIgnoreCase("getpid")) // Keep this for compatibility or specific PID request
@@ -611,7 +742,9 @@ void handleBLECommands(String cmd) // Changed parameter type to Arduino String
                     " MS=" + String(max_straight_speed) + " CS=" + String(cornering_speed) +
                     " MaxErr=" + String(max_error_for_high_speed) + " MinErr=" + String(min_error_for_low_speed) +
                     " SharpRed=" + String(sharp_turn_speed_reduction) + " CorrScl=" + String(correction_scale) +
-                    " BypDur=" + String(bypass_turn_duration) + " ThreshBlk=" + String(threadshold_black);
+                    " ThreshBlk=" + String(threadshold_black) +
+                    " Reacq=" + String(threshold_reacquire) +
+                    " ReacqOuter=" + String(threshold_reacquire_outer);
     debugLog(LOG_PID, logMsg);
     notifyTuningValues(); // Send updated values back via BLE
   }
@@ -639,7 +772,9 @@ void notifyTuningValues()
                        ",MS:" + String(max_straight_speed) + ",CS:" + String(cornering_speed) +
                        ",MaxErr:" + String(max_error_for_high_speed, 2) + ",MinErr:" + String(min_error_for_low_speed, 2) +
                        ",SharpRed:" + String(sharp_turn_speed_reduction) + ",CorrScl:" + String(correction_scale) +
-                       ",BypDur:" + String(bypass_turn_duration) + ",ThreshBlk:" + String(threadshold_black);
+                       ",ThreshBlk=" + String(threadshold_black) +
+                       ",Reacq=" + String(threshold_reacquire) +
+                       ",ReacqOuter=" + String(threshold_reacquire_outer);
 
     // Check length - BLE characteristics have limits (default ~20 bytes, can be negotiated higher)
     if (allValues.length() > 100)
@@ -666,14 +801,33 @@ void setupMotors()
   ledcAttachChannel(PWM_PIN_R_B, PWM_FREQ, PWM_RES, right_motor_channel_b);
 }
 
-// --- Motor Speed Control ---
-void setMotorSpeeds(int left, int right)
+// --- Motor Speed Control (backward support)---
+void setMotorSpeeds(int left, int right) 
 {
-  right = right * SCALE_RIGHT_MOTOR; // Apply scaling factor to right motor
-  ledcWriteChannel(left_motor_channel_a, left);
-  ledcWriteChannel(left_motor_channel_b, 0);
-  ledcWriteChannel(right_motor_channel_a, right);
-  ledcWriteChannel(right_motor_channel_b, 0);
+  if (right > 0)  right = right * SCALE_RIGHT_MOTOR; 
+  // --- Điều khiển Motor Trái ---
+  if (left > 0) {
+    ledcWriteChannel(left_motor_channel_a, left);
+    ledcWriteChannel(left_motor_channel_b, 0);
+  } else if (left < 0) {
+    ledcWriteChannel(left_motor_channel_a, 0);
+    ledcWriteChannel(left_motor_channel_b, abs(left));
+  } else {
+    ledcWriteChannel(left_motor_channel_a, 0);
+    ledcWriteChannel(left_motor_channel_b, 0);
+  }
+
+  // --- Điều khiển Motor Phải ---
+  if (right > 0) {
+    ledcWriteChannel(right_motor_channel_a, right);
+    ledcWriteChannel(right_motor_channel_b, 0);
+  } else if (right < 0) {
+    ledcWriteChannel(right_motor_channel_a, 0);
+    ledcWriteChannel(right_motor_channel_b, abs(right));
+  } else {
+    ledcWriteChannel(right_motor_channel_a, 0);
+    ledcWriteChannel(right_motor_channel_b, 0);
+  }
 }
 
 // --- Color Detection (use in loop if needed) ---
@@ -702,29 +856,20 @@ bool isAllIRBlack()
   // return true;
 }
 
-// --- Start Intersection Bypass Maneuver (Non-Blocking) ---
-void startBypassManeuver()
+// --- Line Reacquisition Detection After Right Turn ---
+bool hasReacquiredLineAfterRightTurn()
 {
-  current_state = STATE_BYPASSING;
-  bypass_start_time = millis();
-  // Dừng trái, phải chạy tốc độ cao
-  setMotorSpeeds(MAX_PWM, 0);
-  debugLog(LOG_INFO, "Bypass state entered. Turning right.");
-  // Reset PID terms to avoid jump when resuming
-  integral = 0;
-  last_error = 0;
-}
-
-// --- Check if Bypass Maneuver is Complete ---
-void checkBypassCompletion()
-{
-  if (millis() - bypass_start_time >= bypass_turn_duration)
-  {
-    current_state = STATE_LINE_FOLLOWING;
-    // Optionally stop motors briefly or let PID take over immediately
-    // setMotorSpeeds(0, 0); // Optional brief stop
-    debugLog(LOG_INFO, "Bypass complete. Resuming line following.");
-  }
-  // Keep turning while bypassing
-  // setMotorSpeeds(MAX_PWM, 0); // Ensure motors stay on during bypass check - already set in startBypassManeuver
+  // The robot has completed a 90-degree right turn when:
+  // 1. Bất kỳ cảm biến nào (IR1 hoặc IR2) phát hiện line đen
+  // 2. Cảm biến ngoài cùng bên phải (IR3) vẫn thấy màu trắng
+  
+  // Kiểm tra ít nhất một trong hai cảm biến ở giữa phát hiện line
+  bool any_inner_sensor_on_line = (ir_norm[1] < threshold_reacquire || ir_norm[2] < threshold_reacquire);
+  
+  // Kiểm tra cảm biến ngoài cùng phía phải vẫn trên nền trắng
+  // Chỉ cần cảm biến ngoài cùng bên phải (IR3) để xác định đã rẽ đủ
+  bool right_outer_on_white = (ir_norm[3] > threshold_reacquire_outer);
+  
+  // Cả hai điều kiện phải đúng để xác nhận đã tái bắt được line
+  return any_inner_sensor_on_line && right_outer_on_white;
 }
