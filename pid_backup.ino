@@ -31,8 +31,15 @@ float max_error_for_high_speed = 2.5;     // Error must be BELOW this to use max
 float min_error_for_low_speed = 3.0;      // Error must be ABOVE this to force cornering_speed. Higher value = more tolerant before slowing down.
 int sharp_turn_speed_reduction = 60;      // Amount to reduce speed further during detected sharp turns.
 int correction_scale = 40;                // Scales PID output to motor speed difference (Tune: 40-80)
-unsigned long bypass_turn_duration = 230; // ms - Duration for the bypass turn
-int threadshold_black = 300;              // IR threshold to consider 'black' for intersection detection
+
+// Intersection state timing & speeds
+unsigned long state_start_time = 0; // Timer for state durations
+const unsigned long BRAKING_DURATION_MS = 30;
+const unsigned long MIN_TURN_DURATION_MS = 200; // Turn at least this long before searching
+const int INTERSECTION_TURN_SPEED = 255;
+const int SEARCHING_TURN_SPEED_LEFT = 200;  // Adjust as needed
+const int SEARCHING_TURN_SPEED_RIGHT = 80; // Slower search turn
+const int LINE_DETECT_THRESHOLD = 300; // IR threshold to detect line
 
 // --- TIMING ---
 unsigned long lastLoop = 0;
@@ -88,7 +95,10 @@ uint16_t ir_max[SENSOR_COUNT] = {0, 0, 0, 0};
 enum RobotState
 {
   STATE_LINE_FOLLOWING,
-  STATE_BYPASSING
+  STATE_INTERSECTION_DETECTED, // Optional pre-state
+  STATE_INTERSECTION_BRAKING,
+  STATE_INTERSECTION_TURNING,
+  STATE_INTERSECTION_SEARCHING_LINE
 };
 
 // --- GLOBALS ---
@@ -97,7 +107,6 @@ float last_error = 0, integral = 0;
 float filtered_derivative = 0; //gia tri vi phan da duoc loc
 uint16_t c_filtered = 0;
 RobotState current_state = STATE_LINE_FOLLOWING;
-unsigned long bypass_start_time = 0;
 
 // --- BLE Logging Globals ---
 float currentP = 0, currentI = 0, currentD = 0;
@@ -108,8 +117,6 @@ int ir_raw[SENSOR_COUNT] = {0, 0, 0, 0};
 int ir_norm[SENSOR_COUNT] = {0, 0, 0, 0}; // 0-1000
 
 // --- FUNCTION DECLARATIONS ---
-void startBypassManeuver(); // Renamed from bypassIntersection
-void checkBypassCompletion();
 void setupMotors();
 void setMotorSpeeds(int left, int right);
 void readIRSensors();
@@ -174,21 +181,54 @@ void loop()
   switch (current_state) {
     case STATE_LINE_FOLLOWING:
     {
-      // Normal PID line following
       float error = computeError();
       float correction = computePID(error);
       applyMotorSpeed(error, correction);
 
-      // Check for intersection if enabled
+      // Detect intersection and start braking
       if (ENABLE_BYPASS_INTERSECTION && isAllIRBlack()) {
-        startBypassManeuver();
+        debugLog(LOG_INFO, "Intersection detected, starting brake.");
+        setMotorSpeeds(-MAX_PWM, -MAX_PWM);
+        current_state = STATE_INTERSECTION_BRAKING;
+        state_start_time = millis();
+        integral = 0;
+        last_error = 0;
+        filtered_derivative = 0;
       }
       break;
     }
 
-    case STATE_BYPASSING:
-      checkBypassCompletion();
+    case STATE_INTERSECTION_BRAKING:
+    {
+      if (millis() - state_start_time >= BRAKING_DURATION_MS) {
+        debugLog(LOG_INFO, "Braking complete, starting turn.");
+        setMotorSpeeds(INTERSECTION_TURN_SPEED, 0);
+        current_state = STATE_INTERSECTION_TURNING;
+        state_start_time = millis();
+      }
       break;
+    }
+
+    case STATE_INTERSECTION_TURNING:
+    {
+      if (millis() - state_start_time >= MIN_TURN_DURATION_MS) {
+        debugLog(LOG_INFO, "Min turn duration met, searching for line.");
+        current_state = STATE_INTERSECTION_SEARCHING_LINE;
+        state_start_time = millis();
+      }
+      break;
+    }
+
+    case STATE_INTERSECTION_SEARCHING_LINE:
+    {
+      setMotorSpeeds(SEARCHING_TURN_SPEED_LEFT, SEARCHING_TURN_SPEED_RIGHT);
+
+      if (ir_norm[1] > LINE_DETECT_THRESHOLD || ir_norm[2] > LINE_DETECT_THRESHOLD) {
+        debugLog(LOG_INFO, "Line found! Resuming line following.");
+        current_state = STATE_LINE_FOLLOWING;
+      }
+      break;
+    }
   }
 
   // BLE connection management
@@ -556,16 +596,6 @@ void handleBLECommands(String cmd) // Changed parameter type to Arduino String
     correction_scale = cmd.substring(10).toInt();
     valueChanged = true;
   }
-  else if (cmd.startsWith("bypdur=")) 
-  {
-    bypass_turn_duration = cmd.substring(7).toInt(); 
-    valueChanged = true;
-  }
-  else if (cmd.startsWith("threshblk=")) 
-  {
-    threadshold_black = cmd.substring(10).toInt();
-    valueChanged = true;
-  }
   else if (cmd.equalsIgnoreCase("getpid"))
     valueChanged = true;
   else if (cmd.equalsIgnoreCase("getall")) 
@@ -577,8 +607,7 @@ void handleBLECommands(String cmd) // Changed parameter type to Arduino String
     String logMsg = "Values: Kp=" + String(Kp) + " Ki=" + String(Ki) + " Kd=" + String(Kd) +
                     " MS=" + String(max_straight_speed) + " CS=" + String(cornering_speed) +
                     " MaxErr=" + String(max_error_for_high_speed) + " MinErr=" + String(min_error_for_low_speed) +
-                    " SharpRed=" + String(sharp_turn_speed_reduction) + " CorrScl=" + String(correction_scale) +
-                    " BypDur=" + String(bypass_turn_duration) + " ThreshBlk=" + String(threadshold_black);
+                    " SharpRed=" + String(sharp_turn_speed_reduction) + " CorrScl=" + String(correction_scale);
     debugLog(LOG_PID, logMsg);
     notifyTuningValues();
   }
@@ -605,8 +634,7 @@ void notifyTuningValues()
     String allValues = "Kp:" + String(Kp, 4) + ",Ki:" + String(Ki, 4) + ",Kd:" + String(Kd, 4) +
                        ",MS:" + String(max_straight_speed) + ",CS:" + String(cornering_speed) +
                        ",MaxErr:" + String(max_error_for_high_speed, 2) + ",MinErr:" + String(min_error_for_low_speed, 2) +
-                       ",SharpRed:" + String(sharp_turn_speed_reduction) + ",CorrScl:" + String(correction_scale) +
-                       ",BypDur:" + String(bypass_turn_duration) + ",ThreshBlk:" + String(threadshold_black);
+                       ",SharpRed:" + String(sharp_turn_speed_reduction) + ",CorrScl:" + String(correction_scale);
 
     // Check length - BLE characteristics have limits (default ~20 bytes, can be negotiated higher)
     if (allValues.length() > 100)
@@ -681,38 +709,6 @@ bool detectNonWhiteLine()
 bool isAllIRBlack()
 {
   // Check sensors first (ensure readIRSensors was called recently)
-  return (ir_norm[0] < threadshold_black && ir_norm[1] < threadshold_black && ir_norm[2] < threadshold_black && ir_norm[3] < threadshold_black);
+  return (ir_norm[0] < THREADSOLD_BLACK && ir_norm[1] < THREADSOLD_BLACK && ir_norm[2] < THREADSOLD_BLACK && ir_norm[3] < THREADSOLD_BLACK);
 
-}
-
-// --- Start Intersection Bypass Maneuver (Non-Blocking) ---
-void startBypassManeuver()
-{
-  // 1. Phanh gấp bằng cách chạy lùi RẤT NGẮN
-  setMotorSpeeds(-255, -255);
-  delay(50);
-
-  // 2. Bắt đầu rẽ phải gắt
-  setMotorSpeeds(MAX_PWM, 0); 
-  
-  // 3. Thiết lập trạng thái bypass
-  current_state = STATE_BYPASSING;
-  bypass_start_time = millis(); 
-  integral = 0;
-  last_error = 0;
-  debugLog(LOG_INFO, "Bypass: Braking then Turning right.");
-}
-
-// --- Check if Bypass Maneuver is Complete ---
-void checkBypassCompletion()
-{
-  if (millis() - bypass_start_time >= bypass_turn_duration)
-  {
-    current_state = STATE_LINE_FOLLOWING;
-    // Optionally stop motors briefly or let PID take over immediately
-    // setMotorSpeeds(0, 0); // Optional brief stop
-    debugLog(LOG_INFO, "Bypass complete. Resuming line following.");
-  }
-  // Keep turning while bypassing
-  // setMotorSpeeds(MAX_PWM, 0); // Ensure motors stay on during bypass check - already set in startBypassManeuver
 }
