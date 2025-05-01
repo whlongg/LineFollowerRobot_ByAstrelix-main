@@ -35,9 +35,9 @@ int correction_scale = 40;                // Scales PID output to motor speed di
 // Intersection state timing & speeds
 unsigned long state_start_time = 0; // Timer for state durations
 const unsigned long BRAKING_DURATION_MS = 30;
-const unsigned long MIN_TURN_DURATION_MS = 200; // Turn at least this long before searching
+const unsigned long MIN_TURN_DURATION_MS = 210; // Turn at least this long before searching
 const int INTERSECTION_TURN_SPEED = 255;
-const int SEARCHING_TURN_SPEED_LEFT = 200;  // Adjust as needed
+const int SEARCHING_TURN_SPEED_LEFT = 210;  // Adjust as needed
 const int SEARCHING_TURN_SPEED_RIGHT = 80; // Slower search turn
 const int LINE_DETECT_THRESHOLD = 300; // IR threshold to detect line
 
