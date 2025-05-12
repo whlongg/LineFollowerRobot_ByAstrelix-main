@@ -1,6 +1,6 @@
 #include "ReadIR.h"
 #include <Arduino.h>
-
+#include "MotorControl.h"
 ReadIR::ReadIR()
 {
     // Constructor không cần khởi tạo gì thêm
@@ -22,12 +22,8 @@ void ReadIR::begin()
 
     // Khởi tạo mảng giá trị cảm biến
     for (int i = 0; i < SENSOR_COUNT; i++)
-    {
         for (int j = 0; j < FILTER_SIZE; j++)
-        {
             ir_values[i][j] = 0;
-        }
-    }
 }
 
 void ReadIR::readSensors(float *sensorValues)
@@ -46,7 +42,6 @@ void ReadIR::readSensors(float *sensorValues)
     // Cập nhật chỉ số bộ lọc
     filter_index = (filter_index + 1) % FILTER_SIZE;
 }
-
 
 void ReadIR::filterSensorValues(float rawValues[][FILTER_SIZE], float *filteredValues)
 {
@@ -67,17 +62,38 @@ float ReadIR::calculateError()
 
     // Convert float values to uint16_t for QTR line position calculation
     uint16_t rawValues[SENSOR_COUNT];
-    for (int i = 0; i < SENSOR_COUNT; i++) {
+    for (int i = 0; i < SENSOR_COUNT; i++)
+    {
         rawValues[i] = (uint16_t)sensorValues[i];
     }
 
     // Get line position from QTRSensors (returns value from 0 to 3000 for 4 sensors)
     uint16_t position = qtr.readLineBlack(rawValues);
-    
-    // Convert position to normalized error (-1 to 1)
-    // 1500 is the center position (3000/2)
-    float error = (position - 1500.0f) / 1500.0f;
-    
+
+    float error = (position - 1500.0f) / 15.0f; // [-100, 100]
+
     return error;
 }
+// “Lệch trái” là đường đen nằm lệch sang phía bên tay trái của robot -> rẽ phải
 
+void ReadIR::CalibrateSensor()
+{
+    unsigned long startTime = millis(), currentTime = startTime;
+    float sensorValues[SENSOR_COUNT];
+    uint16_t rawValues[SENSOR_COUNT];
+    MotorControl motor;
+
+    while (currentTime - startTime < duration)
+    {
+        readSensors(sensorValues);
+        qtr.calibrate();
+        for (int i = 0; i < SENSOR_COUNT; i++) {
+            rawValues[i] = (uint16_t)sensorValues[i];
+        }
+        if (qtr.readLineBlack(rawValues) > 1500)
+            motor.turnRight(SPEED_CALIBRATE);
+        else
+            motor.turnLeft(SPEED_CALIBRATE);
+        currentTime = millis();
+    }
+}

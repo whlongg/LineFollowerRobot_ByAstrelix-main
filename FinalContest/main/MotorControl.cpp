@@ -46,3 +46,28 @@ void setMotorSpeeds(int left, int right)
     ledcWriteChannel(right_motor_channel_b, 0);
   }
 }
+
+void MotorControl::turnRight(int speed)
+{
+  setMotorSpeeds(speed, 0);
+}
+
+void MotorControl::turnLeft(int speed)
+{
+  setMotorSpeeds(0, speed);
+}
+
+void MotorControl::Back(int speed)
+{
+  setMotorSpeeds(-speed, -speed);
+}
+
+void MotorControl::Forward(int speed)
+{
+  setMotorSpeeds(speed, speed);
+}
+
+void MotorControl::stop()
+{
+  setMotorSpeeds(0, 0);
+}

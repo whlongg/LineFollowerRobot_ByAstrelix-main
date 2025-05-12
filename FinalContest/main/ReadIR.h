@@ -13,9 +13,12 @@ public:
     void begin();
     void readSensors(float *sensorValues);
     float calculateError();
+    void CalibrateSensor();
 
 private:
     QTRSensors qtr;
+    const int duration = 5000; // 3 seconds
+    const int SPEED_CALIBRATE = 100;
     const uint8_t IR_PINS[SENSOR_COUNT] = {4, 3, 1, 0};
     const int W_LED_ON = 20;
     const int IR_LED_ON = 21;

@@ -22,4 +22,14 @@ extern const int right_motor_channel_b;
 void setupMotors();
 void setMotorSpeeds(int left, int right);
 
+class MotorControl
+{
+    public:
+        void turnRight(int speed);
+        void turnLeft(int speed);
+        void Back(int speed);
+        void Forward(int speed);
+        void stop();
+};
+
 #endif
