@@ -14,40 +14,43 @@ ColorTracker::ColorTracker(uint16_t readInterval)
 
 bool ColorTracker::begin()
 {
+    // Thử khởi tạo với tham số tích hợp thấp hơn và gain cao hơn
+    // TCS34725_INTEGRATIONTIME_24MS và GAIN_16X để phản ứng nhanh hơn
     sensorReady = tcs.begin();
-
+    
     if (sensorReady)
     {
-        // Khởi tạo thành công, trì hoãn đọc đầu tiên
-        delay(10);
-
-        // Đọc lần đầu
+        // Đọc lần đầu 
         readRawData();
         classifyColor();
         dataUpdated = true;
         timestamp = millis();
     }
-
+    
     return sensorReady;
 }
 
 bool ColorTracker::update()
 {
-    if (!sensorReady)
+    if (!sensorReady) 
         return false;
 
     unsigned long currentTime = millis();
 
+    // Đảm bảo khoảng cách giữa các lần đọc không nhỏ hơn 10ms
+    // để tránh đọc quá nhanh vượt khả năng cảm biến
     if (currentTime - lastReadTime >= readInterval)
     {
-        // Đã đến thời điểm đọc mới
+        // Đọc giá trị trực tiếp từ thanh ghi không gây chặn
         readRawData();
+        
+        // Phân loại màu
         classifyColor();
-
+        
         lastReadTime = currentTime;
         timestamp = currentTime;
         dataUpdated = true;
-
+        
         return true;
     }
 
@@ -65,9 +68,9 @@ void ColorTracker::readRawData()
 
 void ColorTracker::classifyColor()
 {
-    // Xử lý logic phân loại màu
-
-    // Kiểm tra màu đen (độ sáng thấp)
+    // Xử lý nhanh hơn bằng cách kiểm tra trường hợp đơn giản trước
+    
+    // Kiểm tra nhanh cho màu đen (độ sáng thấp)
     if (c <= maxBlackThreshold)
     {
         detectedColor = COLOR_BLACK;
@@ -75,36 +78,47 @@ void ColorTracker::classifyColor()
         return;
     }
 
-    // Kiểm tra màu trắng (độ sáng cao)
-    if (c >= minWhiteThreshold)
-    {
-        detectedColor = COLOR_WHITE;
-        highSpeedMode = false;
-        return;
-    }
+    // Kiểm tra nhanh cho màu trắng (độ sáng cao)
+    // if (c >= minWhiteThreshold)
+    // {
+    //     detectedColor = COLOR_WHITE;
+    //     highSpeedMode = false;
+    //     return;
+    // }
 
-    // Chuẩn hóa giá trị để so sánh tương quan giữa các kênh màu
-    float r_norm = (float)r / c;
-    float g_norm = (float)g / c;
-    float b_norm = (float)b / c;
+    // Cache giá trị để tránh tính toán nhiều lần
+    float inv_c = 0;
+    if (c > 0) inv_c = 1.0f / c;
+    
+    // Tính giá trị chuẩn hóa
+    float r_norm = r * inv_c;
+    float g_norm = g * inv_c;
+    float b_norm = b * inv_c;
 
-    // Màu xanh lá: kênh G cao hơn đáng kể so với R và B
-    if ((g_norm > r_norm * greenRatioThreshold) && (g_norm > b_norm * greenRatioThreshold))
+    // Sử dụng cả tỷ lệ và giá trị tuyệt đối để xác định màu xanh lá và xanh dương
+    // Màu xanh lá: G cao hơn R và B
+    bool greenDominant = (g_norm > r_norm * greenRatioThreshold) && (g_norm > b_norm * greenRatioThreshold);
+    bool greenIntensity = (g > 500) && (g > r * 1.2) && (g > b * 1.2);
+    
+    if (greenDominant || greenIntensity)
     {
         detectedColor = COLOR_GREEN;
         highSpeedMode = true;
         return;
     }
 
-    // Màu xanh dương: kênh B cao hơn đáng kể so với R và G
-    if ((b_norm > r_norm * blueRatioThreshold) && (b_norm > g_norm * blueRatioThreshold))
+    // Màu xanh dương: B cao hơn R và G
+    bool blueDominant = (b_norm > r_norm * blueRatioThreshold) && (b_norm > g_norm * blueRatioThreshold);
+    bool blueIntensity = (b > 500) && (b > r * 1.2) && (b > g * 1.2);
+    
+    if (blueDominant || blueIntensity)
     {
         detectedColor = COLOR_BLUE;
         highSpeedMode = false;
         return;
     }
 
-    // Mặc định: coi như đen nếu không khớp với màu nào
+    // Mặc định: màu đen
     detectedColor = COLOR_BLACK;
     highSpeedMode = false;
 }

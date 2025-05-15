@@ -50,7 +50,7 @@ bool BLEDebug::begin(const char* deviceName) {
     pCharacteristicRX = pService->createCharacteristic(
                             CHARACTERISTIC_UUID_RX,
                             BLECharacteristic::PROPERTY_WRITE |
-                            BLECharacteristic::PROPERTY_NOTIFY
+                            BLECharacteristic::PROPERTY_WRITE_NR  // Bổ sung WRITE_NO_RESPONSE
                           );
     
     pCharacteristicTX = pService->createCharacteristic(
@@ -60,7 +60,6 @@ bool BLEDebug::begin(const char* deviceName) {
                           );
                           
     // Thêm descriptor cho notifications
-    pCharacteristicRX->addDescriptor(new BLE2902());
     pCharacteristicTX->addDescriptor(new BLE2902());
     
     // Đặt callbacks cho Characteristic RX
@@ -117,8 +116,9 @@ void BLEDebug::sendData(const String& data) {
         // Gửi dữ liệu qua BLE
         pCharacteristicTX->setValue(data.c_str());
         pCharacteristicTX->notify();
-        // Thêm độ trễ nhỏ để đảm bảo dữ liệu được gửi đi hoàn tất
-        delay(3);
+        
+        // Cho phép ESP32 xử lý các tác vụ cơ bản, nhưng tránh delay
+        yield();
     }
 }
 

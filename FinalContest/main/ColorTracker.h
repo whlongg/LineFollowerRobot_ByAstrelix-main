@@ -75,7 +75,8 @@ public:
     void getNormalizedValues(uint8_t *r, uint8_t *g, uint8_t *b);
 
 private:
-    Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+    //Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);  
+    Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_16X);
     unsigned long lastReadTime;
     uint16_t readInterval;
     bool sensorReady;
