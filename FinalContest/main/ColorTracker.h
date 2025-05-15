@@ -16,11 +16,8 @@ public:
      * @brief Khởi tạo ColorTracker với thời gian đọc cảm biến tùy chỉnh
      * @param readInterval Khoảng thời gian giữa các lần đọc cảm biến (ms)
      * @param integrationTime Thời gian tích hợp của cảm biến (từ 2.4 đến 614.4 ms)
-     * @param gain Độ khuếch đại (1x, 4x, 16x, 60x)
      */
-    ColorTracker(uint16_t readInterval = 50, 
-                 tcs34725IntegrationTime_t integrationTime = TCS34725_INTEGRATIONTIME_50MS,
-                 tcs34725Gain_t gain = TCS34725_GAIN_4X);
+    ColorTracker(uint16_t readInterval = 50);
     
     /**
      * @brief Khởi tạo cảm biến
@@ -78,7 +75,7 @@ public:
     void getNormalizedValues(uint8_t *r, uint8_t *g, uint8_t *b);
 
 private:
-    Adafruit_TCS34725 tcs;
+    Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
     unsigned long lastReadTime;
     uint16_t readInterval;
     bool sensorReady;

@@ -5,5 +5,8 @@
         "markdown": false,
         "scminput": false,
         "cpp": true
+    },
+    "files.associations": {
+        "ios": "cpp"
     }
 }

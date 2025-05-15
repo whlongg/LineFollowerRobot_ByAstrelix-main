@@ -181,6 +181,18 @@ int FuzzyController::computeOutput(float error, float deltaError) {
         deltaErrorDegree.PS, deltaErrorDegree.PM, deltaErrorDegree.PL
     };
     
+    // Debug - in thông tin mức độ thành viên
+    /*
+    Serial.println("Error membership:");
+    Serial.print("NL: "); Serial.print(eMembers[0]);
+    Serial.print(", NM: "); Serial.print(eMembers[1]);
+    Serial.print(", NS: "); Serial.print(eMembers[2]);
+    Serial.print(", Z: "); Serial.print(eMembers[3]);
+    Serial.print(", PS: "); Serial.print(eMembers[4]);
+    Serial.print(", PM: "); Serial.print(eMembers[5]);
+    Serial.print(", PL: "); Serial.println(eMembers[6]);
+    */
+    
     // Đánh giá từng luật và áp dụng phương pháp MAX-MIN
     for (int e = 0; e < 7; e++) {
         for (int de = 0; de < 7; de++) {
@@ -195,5 +207,11 @@ int FuzzyController::computeOutput(float error, float deltaError) {
     }
     
     // Bước 3: Giải mờ hóa
-    return defuzzify(outputStrength);
+    int result = defuzzify(outputStrength);
+    
+    // Debug - in kết quả đầu ra
+    //Serial.print("Fuzzy Output: ");
+    //Serial.println(result);
+    
+    return result;
 }

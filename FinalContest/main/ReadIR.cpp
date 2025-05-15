@@ -96,4 +96,7 @@ void ReadIR::CalibrateSensor()
             motor.turnLeft(SPEED_CALIBRATE);
         currentTime = millis();
     }
+    
+    // Dừng động cơ sau khi hoàn tất hiệu chỉnh
+    motor.stop();
 }

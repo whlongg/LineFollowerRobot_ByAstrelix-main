@@ -32,7 +32,7 @@ public:
      */
     explicit RobotController(
         ControllerType type = CONTROLLER_PID,
-        float kp = 1.0f, float ki = 0.0f, float kd = 0.0f,
+        float kp = 0.38f, float ki = 0.0f, float kd = 3.8f,
         float inputMin = -100.0f, float inputMax = 100.0f,
         float outputMin = -100.0f, float outputMax = 100.0f
     );
