@@ -19,7 +19,7 @@
 #define BASE_SPEED 212          // Tốc độ cơ bản
 #define HIGH_SPEED 250          // Tốc độ cao
 #define TURN_SPEED 150          // Tốc độ khi rẽ
-#define MAX_ADJUST_SPEED 255    // Điều chỉnh tốc độ tối đa
+//#define MAX_ADJUST_SPEED 255    // Điều chỉnh tốc độ tối đa
 #define MODE_CONTROL CONTROLLER_PID // Chế độ điều khiển (PID, Fuzzy, Hybrid)
 
 // Tham số Fuzzy cho dễ điều chỉnh
@@ -35,16 +35,15 @@
 #define PIDW 1.0
 #define FUZW 0.0
 // Thời gian lấy mẫu và chu kỳ xử lý (ms)
-#define SAMPLE_TIME 2
-#define COLOR_SAMPLE_TIME 12
+#define SAMPLE_TIME 5
+#define COLOR_SAMPLE_TIME 25
 
 // ĐỊNH NGHĨA BẬT TẮT CHẾ ĐỘ ĐỌC MÀU VÀ DEBUG
-#define ENABLE_COLOR_READING true
+#define ENABLE_COLOR_DEFAULT 1  // Giá trị mặc định cho việc đọc màu (1: bật, 0: tắt)
 #define ENABLE_DEBUG true
 #define DEBUG_INTERVAL 50  // Thời gian giữa các lần gửi debug (ms)
 
-// ĐỊNH NGHĨA BỘ LỌC CHO ERROR VÀ ĐẦU RA
-#define ERROR_FILTER_ALPHA 0.7   // Hệ số lọc cho error (0-1)
+// ĐỊNH NGHĨA BỘ LỌC CHO ĐẦU RA
 #define OUTPUT_FILTER_ALPHA 0.6  // Hệ số lọc cho đầu ra điều khiển (0-1)
 
 // Tên thiết bị BLE
@@ -56,9 +55,12 @@ ReadIR irSensor;
 ColorTracker colorTracker(COLOR_SAMPLE_TIME);
 MotorControl motor;
 TurnLogic turnLogic;
-
+ 
 // Biến toàn cục
 unsigned long lastUpdateTime = 0;
+
+// Biến bật/tắt phát hiện màu
+bool enableColorReading = ENABLE_COLOR_DEFAULT;
 unsigned long lastStatusTime = 0;
 unsigned long lastTurnCheck = 0;
 float lastError = 0;
@@ -75,11 +77,9 @@ float currentKd = KD;
 // Biến cho bộ lọc error và đầu ra
 float filteredError = 0.0f;
 float filteredOutput = 0.0f;
-float errorFilterAlpha = ERROR_FILTER_ALPHA;
 float outputFilterAlpha = OUTPUT_FILTER_ALPHA;
 
 // Biến runtime để bật/tắt các tính năng
-bool enableColorReading = ENABLE_COLOR_READING;
 bool enableDebug = ENABLE_DEBUG;
 
 // Thêm các biến thời gian cho các chu kỳ
@@ -150,6 +150,73 @@ void setup() {
   } else {
     Serial.println("Đã khởi tạo cảm biến màu");
   }
+  
+  // Kiểm tra và hiệu chuẩn màu sắc nếu cần
+  if (colorTracker.begin()) {
+    // Kiểm tra xem đã có dữ liệu hiệu chuẩn chưa
+    if (!colorTracker.isCalibrated()) {
+      Serial.println("Chưa có dữ liệu hiệu chuẩn màu sắc. Bắt đầu quy trình hiệu chuẩn...");
+      
+      // Hướng dẫn hiệu chuẩn màu xanh dương
+      Serial.println("Đặt MẪU MÀU XANH DƯƠNG vào cảm biến và nhấn nút để hiệu chuẩn");
+      bleDebug.sendMessage("Hiệu chuẩn: Đặt XANH DƯƠNG vào cảm biến");
+      
+      // Nhấp nháy LED nhanh để báo hiệu chế độ hiệu chuẩn màu xanh dương
+      for (int i = 0; i < 5; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(LED_PIN, LOW);
+        delay(100);
+      }
+      
+      // Đợi người dùng nhấn nút
+      waitForButtonPress();
+      
+      // Hiệu chuẩn màu xanh dương
+      colorTracker.calibrateBlueColor();
+      Serial.println("Đã hiệu chuẩn màu XANH DƯƠNG");
+      bleDebug.sendMessage("Đã hiệu chuẩn XANH DƯƠNG");
+      
+      // Chờ 1 giây
+      delay(1000);
+      
+      // Hướng dẫn hiệu chuẩn màu xanh lá
+      Serial.println("Đặt MẪU MÀU XANH LÁ vào cảm biến và nhấn nút để hiệu chuẩn");
+      bleDebug.sendMessage("Hiệu chuẩn: Đặt XANH LÁ vào cảm biến");
+      
+      // Nhấp nháy LED chậm để báo hiệu chế độ hiệu chuẩn màu xanh lá
+      for (int i = 0; i < 5; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(200);
+        digitalWrite(LED_PIN, LOW);
+        delay(200);
+      }
+      
+      // Đợi người dùng nhấn nút
+      waitForButtonPress();
+      
+      // Hiệu chuẩn màu xanh lá
+      colorTracker.calibrateGreenColor();
+      Serial.println("Đã hiệu chuẩn màu XANH LÁ");
+      bleDebug.sendMessage("Đã hiệu chuẩn XANH LÁ");
+      
+      // Lưu thông số hiệu chuẩn vào EEPROM
+      colorTracker.saveCalibrationToEEPROM();
+      Serial.println("Đã lưu thông số hiệu chuẩn vào EEPROM");
+      bleDebug.sendMessage("Đã lưu cấu hình hiệu chuẩn");
+      
+      // Nhấp nháy LED để báo hiệu hoàn thành
+      for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(500);
+        digitalWrite(LED_PIN, LOW);
+        delay(500);
+      }
+    } else {
+      Serial.println("Đã tải thông số hiệu chuẩn màu từ EEPROM");
+    }
+  }
+  
   if (MODE_CONTROL == CONTROLLER_HYBRID) {
     // Thiết lập trọng số cho điều khiển hybrid
     controller.setHybridWeights(PIDW, FUZW);
@@ -195,9 +262,9 @@ void setup() {
   // Nhấp nháy LED để thông báo bắt đầu hiệu chỉnh
   for (int i = 0; i < 3; i++) {
     digitalWrite(LED_PIN, HIGH);
-    delay(100);
+    delay(500);
     digitalWrite(LED_PIN, LOW);
-    delay(100);
+    delay(500);
     yield();
   }
   
@@ -409,6 +476,19 @@ void checkSerialCommand() {
       return;
     }
     
+    // Bật/tắt phát hiện màu
+    if (command == "rgb on" || command == "color on") {
+      enableColorReading = true;
+      Serial.println("Đã bật chế độ phát hiện màu RGB");
+      return;
+    }
+    
+    if (command == "rgb off" || command == "color off") {
+      enableColorReading = false;
+      Serial.println("Đã tắt chế độ phát hiện màu RGB");
+      return;
+    }
+    
     // Lệnh thay đổi tham số PID
     if (command.startsWith("pid")) {
       int idx1 = command.indexOf(' ');
@@ -542,19 +622,14 @@ void checkSerialCommand() {
     // Điều chỉnh tham số bộ lọc
     if (command.startsWith("filter")) {
       int idx1 = command.indexOf(' ');
-      int idx2 = command.indexOf(' ', idx1 + 1);
       
-      if (idx1 > 0 && idx2 > idx1) {
-        float errorAlpha = command.substring(idx1, idx2).toFloat();
-        float outputAlpha = command.substring(idx2).toFloat();
+      if (idx1 > 0) {
+        float outputAlpha = command.substring(idx1).toFloat();
         
         // Giới hạn giá trị hợp lệ (0-1)
-        errorFilterAlpha = constrain(errorAlpha, 0.0, 1.0);
         outputFilterAlpha = constrain(outputAlpha, 0.0, 1.0);
         
-        Serial.print("Đã cập nhật tham số bộ lọc: Error=");
-        Serial.print(errorFilterAlpha);
-        Serial.print(", Output=");
+        Serial.print("Đã cập nhật tham số bộ lọc: Output=");
         Serial.println(outputFilterAlpha);
       }
       return;
@@ -748,25 +823,15 @@ void processPID() {
   // Tính toán error từ cảm biến hồng ngoại
   rawError = irSensor.calculateError();
   
-  // Lọc error
-  filteredError = errorFilterAlpha * filteredError + (1.0f - errorFilterAlpha) * rawError;
-  float error = filteredError;
-  
-  // Tính toán delta time
+  // Tính dt thực tế
   unsigned long currentTime = millis();
-  float dt = (currentTime - lastUpdateTime) / 1000.0f; // Chuyển đổi sang giây
+  float dt = (currentTime - previousPIDTime) / 1000.0f;
+  dt = std::max(0.001f, std::min(0.1f, dt)); // Giới hạn dt trong phạm vi hợp lý
   
-  // Giới hạn dt trong phạm vi hợp lý
-  dt = constrain(dt, 0.001f, 0.5f);
-  
-  // Làm mới thời gian
-  lastUpdateTime = currentTime;
-  
-  // Tính toán đầu ra điều khiển
-  rawControlOutput = controller.compute(error, dt);
+  // Tính toán đầu ra điều khiển với dt thực tế
+  rawControlOutput = controller.compute(rawError, dt);
   
   // Lọc và giới hạn đầu ra điều khiển
-  rawControlOutput = constrain(rawControlOutput, -MAX_ADJUST_SPEED, MAX_ADJUST_SPEED);
   filteredOutput = outputFilterAlpha * filteredOutput + (1.0f - outputFilterAlpha) * rawControlOutput;
   controlOutput = (int)filteredOutput;
   
@@ -800,9 +865,11 @@ void processPID() {
       // Cập nhật cho logic rẽ - Checkpoint không ảnh hưởng đến tốc độ tại đây
       int blue = (colorValue == COLOR_BLUE) ? 1 : 0;
       int green = (colorValue == COLOR_GREEN) ? (highSpeedMode ? 2 : 1) : 0;
-      turnLogic.update(blue, green, error);
+      turnLogic.update(blue, green, rawError);
     }
   }
+  
+  previousPIDTime = currentTime;
 }
 
 void sendDebugInfo() {

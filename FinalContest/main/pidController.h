@@ -40,6 +40,7 @@ private:
     // Trạng thái của bộ điều khiển
     float lastError;  // Sai số trước đó
     float integral;   // Giá trị tích phân
+    float lastDerivative; // Giá trị đạo hàm trước đó
     
     // Giới hạn
     float outputMin;   // Giới hạn đầu ra nhỏ nhất
@@ -47,6 +48,8 @@ private:
     float integralMin; // Giới hạn tích phân nhỏ nhất
     float integralMax; // Giới hạn tích phân lớn nhất
     bool isFirstCompute; // Kiểm tra có phải lần gọi compute đầu tiên không
+    //filter
+    const float alpha = 0.7f; // Hệ số lọc (có thể điều chỉnh)
 };
 
 #endif // PID_CONTROLLER_H

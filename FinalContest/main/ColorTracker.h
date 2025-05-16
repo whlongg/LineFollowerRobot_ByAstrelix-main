@@ -3,6 +3,7 @@
 
 #include <Wire.h>
 #include <Adafruit_TCS34725.h>
+#include <EEPROM.h>
 
 // Định nghĩa các mã màu
 #define COLOR_WHITE 0
@@ -17,7 +18,7 @@ public:
      * @param readInterval Khoảng thời gian giữa các lần đọc cảm biến (ms)
      * @param integrationTime Thời gian tích hợp của cảm biến (từ 2.4 đến 614.4 ms)
      */
-    ColorTracker(uint16_t readInterval = 50);
+    ColorTracker(uint16_t readInterval = 25);
     
     /**
      * @brief Khởi tạo cảm biến
@@ -93,6 +94,30 @@ private:
     float blueRatioThreshold;
     float greenRatioThreshold;
     
+    // Thông số màu sắc HSV và Lab
+    struct ColorParams {
+        // Thông số HSV
+        float blueH, blueS, blueV;
+        float greenH, greenS, greenV;
+        
+        // Thông số Lab
+        float blueL, blueA, blueB;
+        float greenL, greenA, greenB;
+        
+        // Dung sai
+        float hueTolerance;
+        float satTolerance;
+        float valTolerance;
+        float labTolerance;
+    };
+    
+    ColorParams colorParams;
+    bool isCalibrated;
+    
+    // Địa chỉ EEPROM để lưu thông số
+    const int EEPROM_CALIBRATION_ADDR = 0;
+    const int EEPROM_CALIBRATION_FLAG = 100;  // Giá trị kiểm tra
+    
     /**
      * @brief Đọc giá trị RGB và Clear từ cảm biến không chặn
      */
@@ -102,6 +127,83 @@ private:
      * @brief Phân loại màu từ giá trị RGB hiện tại
      */
     void classifyColor();
+    
+    /**
+     * @brief Chuyển từ không gian RGB sang HSV
+     * @param r Giá trị kênh đỏ (0.0 - 1.0)
+     * @param g Giá trị kênh xanh lá (0.0 - 1.0)
+     * @param b Giá trị kênh xanh dương (0.0 - 1.0)
+     * @param h Con trỏ đến H (0-360 độ)
+     * @param s Con trỏ đến S (0.0-1.0)
+     * @param v Con trỏ đến V (0.0-1.0)
+     */
+    void rgbToHsv(float r, float g, float b, float *h, float *s, float *v);
+    
+    /**
+     * @brief Chuyển từ không gian RGB sang XYZ
+     * @param r Giá trị kênh đỏ (0.0 - 1.0)
+     * @param g Giá trị kênh xanh lá (0.0 - 1.0)
+     * @param b Giá trị kênh xanh dương (0.0 - 1.0)
+     * @param x Con trỏ đến X
+     * @param y Con trỏ đến Y
+     * @param z Con trỏ đến Z
+     */
+    void rgbToXyz(float r, float g, float b, float *x, float *y, float *z);
+    
+    /**
+     * @brief Chuyển từ XYZ sang Lab
+     * @param x Giá trị X
+     * @param y Giá trị Y
+     * @param z Giá trị Z
+     * @param l Con trỏ đến L (0-100)
+     * @param a Con trỏ đến a (-128 đến 127)
+     * @param b Con trỏ đến b (-128 đến 127)
+     */
+    void xyzToLab(float x, float y, float z, float *l, float *a, float *b);
+    
+    /**
+     * @brief Chuyển từ không gian RGB sang Lab
+     * @param r Giá trị kênh đỏ (0.0 - 1.0)
+     * @param g Giá trị kênh xanh lá (0.0 - 1.0)
+     * @param b Giá trị kênh xanh dương (0.0 - 1.0)
+     * @param l Con trỏ đến L (0.0-100.0)
+     * @param a Con trỏ đến a (-128.0 to 127.0)
+     * @param b_out Con trỏ đến b (-128.0 to 127.0)
+     */
+    void rgbToLab(float r, float g, float b, float *l, float *a, float *b_out);
+    
+    /**
+     * @brief Tính khoảng cách trong không gian màu Lab
+     * @return Khoảng cách Euclidean giữa hai màu
+     */
+    float colorDistance(float l1, float a1, float b1, float l2, float a2, float b2);
+    
+    /**
+     * @brief Lưu thông số calibrate vào EEPROM
+     */
+    void saveCalibrationToEEPROM();
+    
+    /**
+     * @brief Đọc thông số calibrate từ EEPROM
+     * @return true nếu đọc thành công, false nếu chưa có dữ liệu
+     */
+    bool loadCalibrationFromEEPROM();
+
+    /**
+     * @brief Hiệu chuẩn màu xanh dương bằng mẫu hiện tại
+     */
+    void calibrateBlueColor();
+    
+    /**
+     * @brief Hiệu chuẩn màu xanh lá bằng mẫu hiện tại
+     */
+    void calibrateGreenColor();
+    
+    /**
+     * @brief Kiểm tra xem đã hiệu chuẩn chưa
+     * @return true nếu đã hiệu chuẩn, false nếu chưa
+     */
+    bool isCalibrated() const { return isCalibrated; }
 };
 
 #endif // COLOR_TRACKER_H

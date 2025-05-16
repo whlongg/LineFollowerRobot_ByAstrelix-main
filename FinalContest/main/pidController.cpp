@@ -2,7 +2,7 @@
 
 PIDController::PIDController(float kp, float ki, float kd) 
     : kp(kp), ki(ki), kd(kd), 
-      lastError(0.0f), integral(0.0f), 
+      lastError(0.0f), integral(0.0f), lastDerivative(0.0f),
       outputMin(-100.0f), outputMax(100.0f),
       integralMin(-100.0f), integralMax(100.0f),
       isFirstCompute(true) {
@@ -13,6 +13,7 @@ void PIDController::reset() {
     integral = 0.0f;
     isFirstCompute = true;
 }
+
 
 float PIDController::compute(float error, float dt) {
     // Xác định đạo hàm của error
@@ -34,9 +35,17 @@ float PIDController::compute(float error, float dt) {
     
     // Lưu error hiện tại để sử dụng cho lần tính toán tiếp theo
     lastError = error;
+
+    // Thêm bộ lọc cho thành phần vi phân
+    float derivativeFiltered = derivative;
+    if (!isFirstCompute) {
+        // Áp dụng bộ lọc low-pass cho thành phần vi phân
+        derivativeFiltered = alpha * derivative + (1 - alpha) * lastDerivative;
+        lastDerivative = derivativeFiltered;
+    }
     
-    // Tính toán đầu ra PID
-    float output = kp * error + ki * integral + kd * derivative;
+    // Tính toán đầu ra PID với thành phần vi phân đã lọc
+    float output = kp * error + ki * integral + kd * derivativeFiltered;
     
     // Giới hạn đầu ra
     output = std::max(outputMin, std::min(outputMax, output));
