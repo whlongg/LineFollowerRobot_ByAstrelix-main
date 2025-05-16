@@ -7,7 +7,7 @@ ColorTracker::ColorTracker(uint16_t readInterval)
       dataUpdated(false),
       detectedColor(COLOR_BLACK),
       highSpeedMode(false),
-      isCalibrated(false)
+      m_isCalibrated(false)
 {
     // Khởi tạo giá trị mặc định cho các ngưỡng
     setThresholds();
@@ -388,7 +388,7 @@ void ColorTracker::saveCalibrationToEEPROM()
     addr += sizeof(float);
     EEPROM.put(addr, colorParams.labTolerance);
     
-    isCalibrated = true;
+    m_isCalibrated = true;
 }
 
 // Đọc cấu hình hiệu chuẩn từ EEPROM
@@ -398,7 +398,7 @@ bool ColorTracker::loadCalibrationFromEEPROM()
     
     // Kiểm tra đánh dấu hiệu chuẩn
     if (EEPROM.read(addr++) != EEPROM_CALIBRATION_FLAG) {
-        isCalibrated = false;
+        m_isCalibrated = false;
         return false;
     }
     
@@ -443,7 +443,7 @@ bool ColorTracker::loadCalibrationFromEEPROM()
     addr += sizeof(float);
     EEPROM.get(addr, colorParams.labTolerance);
     
-    isCalibrated = true;
+    m_isCalibrated = true;
     return true;
 }
 

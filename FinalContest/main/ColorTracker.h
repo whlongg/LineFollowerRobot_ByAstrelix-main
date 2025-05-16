@@ -112,7 +112,7 @@ private:
     };
     
     ColorParams colorParams;
-    bool isCalibrated;
+    bool m_isCalibrated;
     
     // Địa chỉ EEPROM để lưu thông số
     const int EEPROM_CALIBRATION_ADDR = 0;
@@ -178,6 +178,7 @@ private:
      */
     float colorDistance(float l1, float a1, float b1, float l2, float a2, float b2);
     
+public:
     /**
      * @brief Lưu thông số calibrate vào EEPROM
      */
@@ -189,11 +190,13 @@ private:
      */
     bool loadCalibrationFromEEPROM();
 
+public:
     /**
      * @brief Hiệu chuẩn màu xanh dương bằng mẫu hiện tại
      */
     void calibrateBlueColor();
     
+public:
     /**
      * @brief Hiệu chuẩn màu xanh lá bằng mẫu hiện tại
      */
@@ -203,7 +206,7 @@ private:
      * @brief Kiểm tra xem đã hiệu chuẩn chưa
      * @return true nếu đã hiệu chuẩn, false nếu chưa
      */
-    bool isCalibrated() const { return isCalibrated; }
+    bool isCalibrated() const { return m_isCalibrated; }
 };
 
 #endif // COLOR_TRACKER_H
