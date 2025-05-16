@@ -159,7 +159,7 @@ void setup() {
       
       // Hướng dẫn hiệu chuẩn màu xanh dương
       Serial.println("Đặt MẪU MÀU XANH DƯƠNG vào cảm biến và nhấn nút để hiệu chuẩn");
-      bleDebug.sendMessage("Hiệu chuẩn: Đặt XANH DƯƠNG vào cảm biến");
+      bleDebug.sendData("Hiệu chuẩn: Đặt XANH DƯƠNG vào cảm biến");
       
       // Nhấp nháy LED nhanh để báo hiệu chế độ hiệu chuẩn màu xanh dương
       for (int i = 0; i < 5; i++) {
@@ -175,14 +175,14 @@ void setup() {
       // Hiệu chuẩn màu xanh dương
       colorTracker.calibrateBlueColor();
       Serial.println("Đã hiệu chuẩn màu XANH DƯƠNG");
-      bleDebug.sendMessage("Đã hiệu chuẩn XANH DƯƠNG");
+      bleDebug.sendData("Đã hiệu chuẩn XANH DƯƠNG");
       
       // Chờ 1 giây
       delay(1000);
       
       // Hướng dẫn hiệu chuẩn màu xanh lá
       Serial.println("Đặt MẪU MÀU XANH LÁ vào cảm biến và nhấn nút để hiệu chuẩn");
-      bleDebug.sendMessage("Hiệu chuẩn: Đặt XANH LÁ vào cảm biến");
+      bleDebug.sendData("Hiệu chuẩn: Đặt XANH LÁ vào cảm biến");
       
       // Nhấp nháy LED chậm để báo hiệu chế độ hiệu chuẩn màu xanh lá
       for (int i = 0; i < 5; i++) {
@@ -198,12 +198,12 @@ void setup() {
       // Hiệu chuẩn màu xanh lá
       colorTracker.calibrateGreenColor();
       Serial.println("Đã hiệu chuẩn màu XANH LÁ");
-      bleDebug.sendMessage("Đã hiệu chuẩn XANH LÁ");
+      bleDebug.sendData("Đã hiệu chuẩn XANH LÁ");
       
       // Lưu thông số hiệu chuẩn vào EEPROM
       colorTracker.saveCalibrationToEEPROM();
       Serial.println("Đã lưu thông số hiệu chuẩn vào EEPROM");
-      bleDebug.sendMessage("Đã lưu cấu hình hiệu chuẩn");
+      bleDebug.sendData("Đã lưu cấu hình hiệu chuẩn");
       
       // Nhấp nháy LED để báo hiệu hoàn thành
       for (int i = 0; i < 3; i++) {
@@ -872,7 +872,35 @@ void processPID() {
   previousPIDTime = currentTime;
 }
 
-void sendDebugInfo() {
+// Hàm để đợi nhấn nút
+void waitForButtonPress() {
+  // Giả sử nút được kết nối với chân BUTTON_PIN và active-low (áp cao khi không nhấn)
+  
+  // Cấu hình chân nút là INPUT_PULLUP nếu nút active-low
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
+  // Chờ đến khi nút được nhấn
+  bool buttonPressed = false;
+  while (!buttonPressed) {
+    // Nếu giá trị chân BUTTON_PIN là LOW (nút được nhấn với chế độ PULLUP)
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      buttonPressed = true;
+      
+      // Chờ cho nút được thả để tránh debouncing
+      delay(50);
+      while (digitalRead(BUTTON_PIN) == LOW) {
+        delay(10); // Chờ cho nút được thả hoàn toàn
+      }
+      delay(50); // Chờ thêm để tránh debouncing khi thả nút
+    }
+    
+    // Cho phép các tác vụ khác vẫn hoạt động trong khi chờ nút
+    delay(10);
+  }
+}
+
+void sendDebugInfo()
+{
   if (enableDebug) {
     String statusInfo = "Error:R=" + String(rawError) + 
                        ",F=" + String(filteredError) + 
