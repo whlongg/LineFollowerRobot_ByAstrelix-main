@@ -39,7 +39,7 @@ const unsigned long BRAKING_DURATION_MS = 30;
 const unsigned long MIN_TURN_DURATION_MS = 190; // Turn at least this long before searching
 const int INTERSECTION_TURN_SPEED = 255;
 const int SEARCHING_TURN_SPEED_LEFT = 130;  // Adjust as needed
-const int SEARCHING_TURN_SPEED_RIGHT = 35; // Slower search turn
+const int SEARCHING_TURN_SPEED_RIGHT = 40; // Slower search turn
 const int LINE_DETECT_THRESHOLD = 300; // IR threshold to detect line
 
 // --- IR SENSOR FILTER & CONSTANTS ---
@@ -728,5 +728,4 @@ bool isAllIRBlack()
 {
   // Check sensors first (ensure readIRSensors was called recently)
   return (ir_norm[0] < THREADSOLD_BLACK && ir_norm[1] < THREADSOLD_BLACK && ir_norm[2] < THREADSOLD_BLACK && ir_norm[3] < THREADSOLD_BLACK);
-
 }
