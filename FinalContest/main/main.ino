@@ -9,6 +9,7 @@
 #include "ReadIR.h"
 #include "MotorControl.h"
 #include "TurnLogic.h"
+#include "TurnHandler.h"
 #include "BLEdebug.h"  // Thêm include cho BLE
 
 // Định nghĩa chân đèn LED
@@ -41,7 +42,7 @@
 // ĐỊNH NGHĨA BẬT TẮT CHẾ ĐỘ ĐỌC MÀU VÀ DEBUG
 #define ENABLE_COLOR_DEFAULT 1  // Giá trị mặc định cho việc đọc màu (1: bật, 0: tắt)
 #define ENABLE_DEBUG true
-#define DEBUG_INTERVAL 50  // Thời gian giữa các lần gửi debug (ms)
+#define DEBUG_INTERVAL 500  // Thời gian giữa các lần gửi debug (ms)
 
 // ĐỊNH NGHĨA BỘ LỌC CHO ĐẦU RA
 #define OUTPUT_FILTER_ALPHA 0.6  // Hệ số lọc cho đầu ra điều khiển (0-1)
@@ -55,6 +56,7 @@ ReadIR irSensor;
 ColorTracker colorTracker(COLOR_SAMPLE_TIME);
 MotorControl motor;
 TurnLogic turnLogic;
+TurnHandler turnHandler(&motor, &turnLogic);
  
 // Biến toàn cục
 unsigned long lastUpdateTime = 0;
@@ -99,20 +101,25 @@ unsigned long loopTimeMicros = 0;
 // Khai báo hàm
 void setupLED();
 void processColor();
-void handleTurn(TurnDirection direction);
 void checkSerialCommand();
 void processBLECommand(const String& command);
 void updateBLE();
 void checkSerial();
 void updateColor();
 void processPID();
+void waitForButtonPress();
 void sendDebugInfo();
 
 void setup() {
   // Khởi tạo Serial để debug
   Serial.begin(115200);
-  delay(50); // Chờ Serial ổn định
-  Serial.println("Line Follower Robot - Phiên bản cuối cùng");
+  while (!Serial && millis() < 5000);
+  Serial.println("\n===== Khởi động Line Follower Robot =====");
+  
+  // Thiết lập TurnHandler
+  turnHandler.setTurnSpeed(TURN_SPEED);
+  turnHandler.setBaseSpeed(BASE_SPEED);
+  turnHandler.setDefaultDirection(TURN_RIGHT); // Mặc định rẽ phải
   
   // Khởi tạo BLE
   if (bleDebug.begin(BLE_DEVICE_NAME)) {
@@ -324,6 +331,9 @@ void loop() {
     sendDebugInfo();
   }
   
+  // Cập nhật máy trạng thái xử lý rẽ
+  turnHandler.update();
+  
   // Cho phép các tác vụ khác chạy
   yield();
 }
@@ -413,38 +423,7 @@ void processColor() {
   }
 }
 
-// Xử lý rẽ
-void handleTurn(TurnDirection direction) {
-  Serial.print("Thực hiện rẽ: ");
-  
-  // Giảm tốc độ trước khi rẽ
-  motor.Forward(TURN_SPEED);
-  delay(200);
-  
-  switch (direction) {
-    case TURN_LEFT:
-      Serial.println("TRÁI");
-      motor.turnLeft(TURN_SPEED);
-      delay(500); // Điều chỉnh thời gian cho phù hợp với góc rẽ
-      break;
-      
-    case TURN_RIGHT:
-      Serial.println("PHẢI");
-      motor.turnRight(TURN_SPEED);
-      delay(500); // Điều chỉnh thời gian cho phù hợp với góc rẽ
-      break;
-      
-    default:
-      Serial.println("KHÔNG XÁC ĐỊNH");
-      break;
-  }
-  
-  // Tiếp tục di chuyển
-  motor.Forward(BASE_SPEED);
-  
-  // Reset controller để tránh tích lũy sai số
-  controller.reset();
-}
+// Hàm xử lý rẽ đã được chuyển sang TurnHandler.cpp
 
 // Hàm kiểm tra và xử lý lệnh từ Serial (để điều chỉnh tham số)
 void checkSerialCommand() {
@@ -573,6 +552,16 @@ void checkSerialCommand() {
       Serial.print("Tốc độ: ");
       Serial.println(highSpeedMode ? "CAO" : "THƯỜNG");
       
+      Serial.print("Chế độ checkpoint: ");
+      Serial.println(turnHandler.isCheckpointModeEnabled() ? "BẬT" : "TẮT");
+      
+      Serial.print("Hướng rẽ mặc định: ");
+      switch(turnHandler.getDefaultDirection()) {
+        case TURN_LEFT: Serial.println("TRÁI"); break;
+        case TURN_RIGHT: Serial.println("PHẢI"); break;
+        default: Serial.println("KHÔNG XÁC ĐỊNH"); break;
+      }
+      
       return;
     }
     
@@ -588,8 +577,17 @@ void checkSerialCommand() {
       Serial.println("mode_pid: Chuyển sang chế độ PID");
       Serial.println("mode_fuzzy: Chuyển sang chế độ Fuzzy");
       Serial.println("mode_hybrid: Chuyển sang chế độ Hybrid");
+      Serial.println("TL: Rẽ trái tại giao lộ");
+      Serial.println("TR: Rẽ phải tại giao lộ");
+      Serial.println("checkpoint on/cp on: Bật chế độ checkpoint (rẽ theo hướng mặc định)");
+      Serial.println("checkpoint off/cp off: Tắt chế độ checkpoint (rẽ theo TurnLogic)");
       Serial.println("info: Hiển thị thông tin hiện tại");
       Serial.println("help: Hiển thị trợ giúp");
+      return;
+    }
+    
+    // Xử lý lệnh rẽ từ TurnHandler
+    if (turnHandler.processCommand(command)) {
       return;
     }
     
@@ -706,6 +704,50 @@ void processBLECommand(const String& command) {
     return;
   }
   
+  // Lệnh rẽ trái/phải manual
+  if (cmd.startsWith("turn=")) {
+    String dirStr = cmd.substring(5);
+    dirStr.toLowerCase();
+    dirStr.trim();
+    
+    if (dirStr == "left") {
+      turnHandler.startTurn(TURN_LEFT);
+      bleDebug.sendData("Đã bắt đầu rẽ trái");
+    } else if (dirStr == "right") {
+      turnHandler.startTurn(TURN_RIGHT);
+      bleDebug.sendData("Đã bắt đầu rẽ phải");
+    } else {
+      bleDebug.sendData("Hướng rẽ không hợp lệ");
+    }
+    return;
+  }
+  
+  // Lệnh thiết lập hướng rẽ mặc định
+  if (cmd == "TL" || cmd == "tl") {
+    turnHandler.setDefaultDirection(TURN_LEFT);
+    bleDebug.sendData("Đã thiết lập hướng rẽ mặc định: TRÁI");
+    return;
+  }
+  
+  if (cmd == "TR" || cmd == "tr") {
+    turnHandler.setDefaultDirection(TURN_RIGHT);
+    bleDebug.sendData("Đã thiết lập hướng rẽ mặc định: PHẢI");
+    return;
+  }
+  
+  // Lệnh bật/tắt chế độ checkpoint
+  if (cmd == "cp=on") {
+    turnHandler.enableCheckpointMode(true);
+    bleDebug.sendData("Đã bật chế độ checkpoint (rẽ theo hướng mặc định)");
+    return;
+  }
+  
+  if (cmd == "cp=off") {
+    turnHandler.enableCheckpointMode(false);
+    bleDebug.sendData("Đã tắt chế độ checkpoint (rẽ theo TurnLogic)");
+    return;
+  }
+  
   // Lệnh thay đổi tham số PID
   if (cmd.startsWith("pid")) {
     int idx1 = cmd.indexOf(' ');
@@ -759,21 +801,28 @@ void processBLECommand(const String& command) {
   
   // Lệnh yêu cầu thông tin hiện tại
   if (cmd == "info") {
-    String modeStr;
+    Serial.println("BLE: Đang gửi thông tin trạng thái");
+    
+    String controllerTypeStr = "UNKNOWN";
     switch (controller.getControllerType()) {
-      case CONTROLLER_PID:   modeStr = "PID"; break;
-      case CONTROLLER_FUZZY: modeStr = "FUZZY"; break;
-      case CONTROLLER_HYBRID: modeStr = "HYBRID"; break;
+      case CONTROLLER_PID: controllerTypeStr = "PID"; break;
+      case CONTROLLER_FUZZY: controllerTypeStr = "FUZZY"; break;
+      case CONTROLLER_HYBRID: controllerTypeStr = "HYBRID"; break;
     }
     
-    String response = "Mode: " + modeStr + 
-                     ", Speed: " + String(highSpeedMode ? "FAST" : "NORMAL") +
-                     ", PID: KP=" + String(currentKp) +
-                     " KI=" + String(currentKi) +
-                     " KD=" + String(currentKd);
+    String turnDirStr = "KHÔNG XÁC ĐỊNH";
+    switch(turnHandler.getDefaultDirection()) {
+      case TURN_LEFT: turnDirStr = "TRÁI"; break;
+      case TURN_RIGHT: turnDirStr = "PHẢI"; break;
+    }
     
-    Serial.println("BLE info: " + response);
-    bleDebug.sendData(response);
+    bleDebug.sendData("=== Thông tin robot ===\n");
+    bleDebug.sendData("Chế độ điều khiển: " + controllerTypeStr + "\n");
+    bleDebug.sendData("Tốc độ: " + String(highSpeedMode ? "CAO" : "THƯỜNG") + "\n");
+    bleDebug.sendData("Chế độ checkpoint: " + String(turnHandler.isCheckpointModeEnabled() ? "BẬT" : "TẮT") + "\n");
+    bleDebug.sendData("Hướng rẽ mặc định: " + turnDirStr + "\n");
+    bleDebug.sendData("PID: KP=" + String(currentKp) + " KI=" + String(currentKi) + " KD=" + String(currentKd) + "\n");
+    /* Đã gửi phản hồi BLE, không cần bleBuffer */
     return;
   }
   
@@ -848,11 +897,13 @@ void processPID() {
   // Điều khiển động cơ
   setMotorSpeeds(leftSpeed, rightSpeed);
   
-  // Kiểm tra điều kiện rẽ
-  TurnDirection nextTurn = turnLogic.getNextTurn();
-  if (nextTurn != TURN_UNKNOWN) {
-    handleTurn(nextTurn);
-    turnLogic.reset(); // Reset sau khi đã xử lý
+  // Kiểm tra điều kiện rẽ nếu không đang trong quá trình rẽ
+  if (!turnHandler.isTurning()) {
+    TurnDirection nextTurn = turnLogic.getNextTurn();
+    if (nextTurn != TURN_UNKNOWN) {
+      turnHandler.startTurn(nextTurn);
+      turnLogic.reset(); // Reset sau khi đã bắt đầu xử lý
+    }
   }
   
   // Cập nhật logic rẽ dựa trên checkpoint màu nếu có dữ liệu mới
