@@ -21,7 +21,25 @@ void setupMotors()
 // --- Motor Speed Control (backward support)---
 void setMotorSpeeds(int left, int right) 
 {
-  if (right > 0)  right = right * SCALE_RIGHT_MOTOR; 
+  if (right > 0) right = right * SCALE_RIGHT_MOTOR;
+
+  // Giới hạn tốc độ và bù trừ
+  if (left > 255) {
+    right -= (left - 255);
+    left = 255;
+  } else if (left < -255) {
+    right -= (left + 255);
+    left = -255;
+  }
+
+  if (right > 255) {
+    left -= (right - 255);
+    right = 255;
+  } else if (right < -255) {
+    left -= (right + 255); 
+    right = -255;
+  }
+
   // --- Điều khiển Motor Trái ---
   if (left > 0) {
     ledcWriteChannel(left_motor_channel_a, left);
